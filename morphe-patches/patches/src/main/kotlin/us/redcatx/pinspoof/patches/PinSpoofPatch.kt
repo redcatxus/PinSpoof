@@ -7,7 +7,7 @@ import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.patch.BytecodePatchContext
 import app.morphe.patcher.patch.booleanOption
-import app.morphe.patcher.patch.patch
+import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.patch.stringOption
 import app.morphe.patcher.util.cloneParameters
 import app.morphe.patcher.util.findFreeRegister
@@ -49,7 +49,7 @@ private val WEBVIEW_BASE_TYPES = setOf(
 )
 
 @Suppress("unused")
-val pinSpoofPatch = patch(
+val pinSpoofPatch = bytecodePatch(
     name = "PinSpoof",
     description = "Disables app pinning (LockTask), spoofs pinned state, and hides focus/Recents loss directly in patched APKs without root or Xposed.",
     default = true,
@@ -641,7 +641,11 @@ private fun BytecodePatchContext.prepareEntryScratch(
 ) {
     val impl = method.implementation ?: return
     val origP0 = method.p0Register
-    val paramRegs = (origP0 until impl.registerCount).toIntArray()
+    val paramRegs = if (origP0 < impl.registerCount) {
+        IntArray(impl.registerCount - origP0) { origP0 + it }
+    } else {
+        intArrayOf()
+    }
     val free = runCatching { method.findFreeRegister(0, *paramRegs) }.getOrNull()
     if (free != null && free < 256) {
         method.addInstructions(0, buildSmali("v$free", "p0", "p1"))

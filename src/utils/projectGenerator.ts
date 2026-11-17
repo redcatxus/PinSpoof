@@ -2061,7 +2061,7 @@ import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
 import app.morphe.patcher.methodCall
 import app.morphe.patcher.patch.BytecodePatchContext
 import app.morphe.patcher.patch.booleanOption
-import app.morphe.patcher.patch.patch
+import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.patch.stringOption
 import app.morphe.patcher.util.cloneParameters
 import app.morphe.patcher.util.findFreeRegister
@@ -2103,7 +2103,7 @@ private val WEBVIEW_BASE_TYPES = setOf(
 )
 
 @Suppress("unused")
-val pinSpoofPatch = patch(
+val pinSpoofPatch = bytecodePatch(
     name = "${config.moduleName}",
     description = "Disables app pinning (LockTask), spoofs pinned state, and hides focus/Recents loss directly in patched APKs without root or Xposed.",
     default = true,
@@ -2695,7 +2695,11 @@ private fun BytecodePatchContext.prepareEntryScratch(
 ) {
     val impl = method.implementation ?: return
     val origP0 = method.p0Register
-    val paramRegs = (origP0 until impl.registerCount).toIntArray()
+    val paramRegs = if (origP0 < impl.registerCount) {
+        IntArray(impl.registerCount - origP0) { origP0 + it }
+    } else {
+        intArrayOf()
+    }
     val free = runCatching { method.findFreeRegister(0, *paramRegs) }.getOrNull()
     if (free != null && free < 256) {
         method.addInstructions(0, buildSmali("v$free", "p0", "p1"))
@@ -3151,6 +3155,15 @@ App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundl
    - **Morphe Patching (No Root / No Xposed)**: All granular controls are exposed directly as **Morphe Patching Options** inside \`morphe-patches/\` (\`.mpp\` bundle works universally on any APK).
    - **LSPosed Xposed + Material 3 Expressive UI**: Configure global defaults and per-app granular overrides inside the module APK via \`xposedsharedprefs\`.
 
+## Practical Usage
+
+${config.moduleName} lets you stay in control of multitasking and system navigation without breaking apps that insist on locking the screen or reacting aggressively to brief interruptions:
+
+- **Keep Android Navigation & Recents Unlocked**: Stop apps from trapping your device in Screen Pinning so the Back button, Recents overview, gesture navigation, Quick Settings, and notifications always remain usable while the app believes pinning succeeded.
+- **Multitask Without Focus-Loss Nagging or Resets**: Open Recents, switch briefly to a calculator/notes/translator app, pull down the notification shade, or open floating/split-screen windows without triggering focus-lost overlays, forced UI lockouts, WebView playback/timer pauses, or state resets.
+- **No \`system_server\` Scoping Required**: Unlike legacy pinning hooks that hook the Android System Framework (\`android\`), ${config.moduleName} hooks purely inside the scoped target app process (or directly inside a Morphe-patched APK without root or LSPosed).
+- **Per-App or Patch-Time Granularity**: Leave pinning disabled across all scoped apps with **Reactive** mode (spoofs pinned only after \`startLockTask()\` is invoked) or force **Always Pinned**, and toggle individual lifecycle, WebView, multi-window, or settings hooks independently.
+
 ## Option 1: Morphe Patching (No Root / No Xposed)
 
 1. Download the \`${config.moduleName}-morphe-patches\` artifact (\`patches-*.mpp\`) built by \`.github/workflows/build-apk.yml\`, or build locally in \`morphe-patches/\`:
@@ -3178,6 +3191,10 @@ App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundl
 
 Package ID: \`${pkg}\`
 Entry Class: \`${pkg}.PinSpoofModule\`
+
+## Disclaimer
+
+This software is provided **"as-is"**, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. Use it responsibly and solely on devices and software where you are authorized to do so.
 `;
 }
 

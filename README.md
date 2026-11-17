@@ -9,6 +9,15 @@ App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundl
    - **Morphe Patching (No Root / No Xposed)**: All granular controls are exposed directly as **Morphe Patching Options** inside `morphe-patches/` (`.mpp` bundle works universally on any APK).
    - **LSPosed Xposed + Material 3 Expressive UI**: Configure global defaults and per-app granular overrides inside the module APK via `xposedsharedprefs`.
 
+## Practical Usage
+
+PinSpoof lets you stay in control of multitasking and system navigation without breaking apps that insist on locking the screen or reacting aggressively to brief interruptions:
+
+- **Keep Android Navigation & Recents Unlocked**: Stop apps from trapping your device in Screen Pinning so the Back button, Recents overview, gesture navigation, Quick Settings, and notifications always remain usable while the app believes pinning succeeded.
+- **Multitask Without Focus-Loss Nagging or Resets**: Open Recents, switch briefly to a calculator/notes/translator app, pull down the notification shade, or open floating/split-screen windows without triggering focus-lost overlays, forced UI lockouts, WebView playback/timer pauses, or state resets.
+- **No `system_server` Scoping Required**: Unlike legacy pinning hooks that hook the Android System Framework (`android`), PinSpoof hooks purely inside the scoped target app process (or directly inside a Morphe-patched APK without root or LSPosed).
+- **Per-App or Patch-Time Granularity**: Leave pinning disabled across all scoped apps with **Reactive** mode (spoofs pinned only after `startLockTask()` is invoked) or force **Always Pinned**, and toggle individual lifecycle, WebView, multi-window, or settings hooks independently.
+
 ## Option 1: Morphe Patching (No Root / No Xposed)
 
 1. Download the `PinSpoof-morphe-patches` artifact (`patches-*.mpp`) built by `.github/workflows/build-apk.yml`, or build locally in `morphe-patches/`:
@@ -36,3 +45,7 @@ App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundl
 
 Package ID: `us.redcatx.pinspoof`
 Entry Class: `us.redcatx.pinspoof.PinSpoofModule`
+
+## Disclaimer
+
+This software is provided **"as-is"**, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. Use it responsibly and solely on devices and software where you are authorized to do so.
