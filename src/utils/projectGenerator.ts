@@ -1737,7 +1737,8 @@ function generateAndroidManifest(config: ModuleConfig, scopes: string[]): string
   return `<?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-${permissions}    <application
+${permissions}
+    <application
         android:allowBackup="false"
         android:label="@string/app_name"
         android:supportsRtl="true">
@@ -1754,7 +1755,8 @@ ${permissions}    <application
         <meta-data
             android:name="xposedsharedprefs"
             android:value="true" />
-${scopeMeta}${launcherActivity}
+${scopeMeta}
+${launcherActivity}
     </application>
 
 </manifest>
@@ -1795,7 +1797,8 @@ function generateAppBuildGradle(config: ModuleConfig, pkg: string): string {
     ? `
     buildFeatures {
         compose = true
-    }`
+    }
+`
     : '';
 
   const composePlugins = config.includeMaterialYouUi
@@ -1928,7 +1931,7 @@ function generateProguardRules(pkg: string): string {
 
 function generateGithubWorkflow(config: ModuleConfig): string {
   const folderName = config.moduleName.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'PinSpoof';
-  return `name: Build ${config.moduleName} APK
+  return `name: Build ${config.moduleName} APK & Morphe Patches
 
 on:
   push:
@@ -1944,14 +1947,16 @@ jobs:
       - name: Locate Gradle project root
         id: gradle_root
         run: |
-          SETTINGS_PATH=$(find . -maxdepth 3 -name "settings.gradle.kts" -print -quit)
-          if [ -z "$SETTINGS_PATH" ]; then
-            echo "Error: settings.gradle.kts not found in repository."
-            exit 1
+          if [ -f "settings.gradle.kts" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          else
+            SETTINGS_PATH=$(find . -maxdepth 3 -name "settings.gradle.kts" ! -path "*/morphe-patches/*" -print -quit)
+            if [ -z "$SETTINGS_PATH" ]; then
+              echo "Error: root settings.gradle.kts not found in repository."
+              exit 1
+            fi
+            echo "dir=$(dirname "$SETTINGS_PATH")" >> "$GITHUB_OUTPUT"
           fi
-          GRADLE_DIR=$(dirname "$SETTINGS_PATH")
-          echo "Found Gradle build at: $GRADLE_DIR"
-          echo "dir=$GRADLE_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -1983,39 +1988,1193 @@ jobs:
         with:
           name: ${folderName}-apks
           path: \${{ steps.gradle_root.outputs.dir }}/app/build/outputs/apk/**/*.apk
+
+  build-morphe-patches:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Morphe Patches root
+        id: morphe_root
+        run: |
+          if [ -f "morphe-patches/settings.gradle.kts" ]; then
+            echo "dir=morphe-patches" >> "$GITHUB_OUTPUT"
+          else
+            MORPHE_SETTINGS=$(find . -maxdepth 3 -path "*/morphe-patches/settings.gradle.kts" -print -quit)
+            if [ -z "$MORPHE_SETTINGS" ]; then
+              echo "Error: morphe-patches/settings.gradle.kts not found."
+              exit 1
+            fi
+            echo "dir=$(dirname "$MORPHE_SETTINGS")" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Android SDK Platform ${config.targetSdk} & Build Tools
+        run: |
+          SDKMANAGER=$(command -v sdkmanager || find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Error: sdkmanager not found under ANDROID_HOME=$ANDROID_HOME"
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-${config.targetSdk}" "build-tools;${config.targetSdk}.0.0"
+
+      - name: Setup Gradle 9.9.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.9.1
+
+      - name: Build Morphe Patch Bundle (.mpp) & Patches List
+        working-directory: \${{ steps.morphe_root.outputs.dir }}
+        env:
+          GITHUB_ACTOR: \${{ github.actor }}
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: gradle :patches:buildAndroid :patches:generatePatchesList --no-daemon
+
+      - name: Upload Morphe Patch Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${folderName}-morphe-patches
+          path: |
+            \${{ steps.morphe_root.outputs.dir }}/patches/build/libs/*.mpp
+            \${{ steps.morphe_root.outputs.dir }}/patches-list.json
+`;
+}
+
+function generateMorphePatchKt(config: ModuleConfig, pkg: string): string {
+  const extPrefix = `L${pkg.replace(/\./g, '/')}/extension/`;
+  const extClass = `${extPrefix}PinSpoofHooks;`;
+  return `package ${pkg}.patches
+
+import app.morphe.patcher.Fingerprint
+import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
+import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
+import app.morphe.patcher.extensions.InstructionExtensions.replaceInstruction
+import app.morphe.patcher.methodCall
+import app.morphe.patcher.patch.BytecodePatchContext
+import app.morphe.patcher.patch.booleanOption
+import app.morphe.patcher.patch.patch
+import app.morphe.patcher.patch.stringOption
+import app.morphe.patcher.util.cloneParameters
+import app.morphe.patcher.util.findFreeRegister
+import app.morphe.patcher.util.matchAllMethodIndicesForEach
+import app.morphe.patcher.util.numberOfParameterRegistersLogical
+import app.morphe.patcher.util.p0Register
+import app.morphe.patcher.util.proxy.mutableTypes.MutableMethod
+import app.morphe.patcher.util.registersUsed
+import app.morphe.patcher.util.returnEarly
+import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.iface.ClassDef
+import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import com.android.tools.smali.dexlib2.iface.reference.MethodReference
+
+private const val EXTENSION_PREFIX = "${extPrefix}"
+private const val EXTENSION_CLASS = "${extClass}"
+
+private val ACTIVITY_BASE_TYPES = setOf(
+    "Landroid/app/Activity;",
+    "Landroidx/activity/ComponentActivity;",
+    "Landroidx/fragment/app/FragmentActivity;",
+    "Landroidx/appcompat/app/AppCompatActivity;",
+)
+
+private val FRAGMENT_BASE_TYPES = setOf(
+    "Landroidx/fragment/app/Fragment;",
+    "Landroid/app/Fragment;",
+)
+
+private val VIEW_BASE_TYPES = setOf(
+    "Landroid/view/View;",
+    "Landroid/view/ViewGroup;",
+    "Landroid/widget/FrameLayout;",
+    "Landroid/webkit/WebView;",
+)
+
+private val WEBVIEW_BASE_TYPES = setOf(
+    "Landroid/webkit/WebView;",
+)
+
+@Suppress("unused")
+val pinSpoofPatch = patch(
+    name = "${config.moduleName}",
+    description = "Disables app pinning (LockTask), spoofs pinned state, and hides focus/Recents loss directly in patched APKs without root or Xposed.",
+    default = true,
+) {
+    val spoofTiming by stringOption(
+        key = "spoofTiming",
+        default = "${config.spoofTiming}",
+        values = mapOf(
+            "Reactive (after startLockTask)" to "reactive",
+            "Always Pinned (from launch)" to "always",
+        ),
+        title = "Spoof Timing Mode",
+        description = "Choose whether LockTask state is spoofed only after startLockTask() or always from launch.",
+    )
+
+    val hookActivityLockTask by booleanOption(
+        key = "hookActivityLockTask",
+        default = ${config.hookActivityLockTask},
+        title = "Disable Pinning (startLockTask / stopLockTask)",
+        description = "Swallow Activity.startLockTask() and stopLockTask() calls so Android never enters Screen Pinning.",
+    )
+
+    val hookActivityManagerState by booleanOption(
+        key = "hookActivityManagerState",
+        default = ${config.hookActivityManagerState},
+        title = "Spoof ActivityManager Pin State",
+        description = "Return LOCK_TASK_MODE_PINNED (2) for getLockTaskModeState() and true for isInLockTaskMode().",
+    )
+
+    val hideFocusLoss by booleanOption(
+        key = "hideFocusLoss",
+        default = ${config.hideFocusLoss},
+        title = "Hide Window Focus Loss & WebView Visibility",
+        description = "Block onWindowFocusChanged(false), coerce WebView/View window visibility to VISIBLE, and spoof hasWindowFocus() & IMPORTANCE_FOREGROUND.",
+    )
+
+    val hideLifecycleLoss by booleanOption(
+        key = "hideLifecycleLoss",
+        default = ${config.hideLifecycleLoss},
+        title = "Suppress onPause / onStop / Recents Leave",
+        description = "Suppress app onUserLeaveHint(), onPause(), onStop(), ActivityLifecycleCallbacks, WebView.onPause(), and LifecycleRegistry ON_PAUSE/ON_STOP.",
+    )
+
+    val hideMultiWindowAndPip by booleanOption(
+        key = "hideMultiWindowAndPip",
+        default = ${config.hideMultiWindowAndPip},
+        title = "Hide Multi-Window & Picture-in-Picture",
+        description = "Return false for Activity.isInMultiWindowMode() and isInPictureInPictureMode().",
+    )
+
+    val hookSettingsLockToApp by booleanOption(
+        key = "hookSettingsLockToApp",
+        default = ${config.hookSettingsLockToApp},
+        title = "Spoof Settings.System lock_to_app_enabled",
+        description = "Return 1 when the target app queries Settings.System lock_to_app_enabled.",
+    )
+
+    val hookDevicePolicyPermitted by booleanOption(
+        key = "hookDevicePolicyPermitted",
+        default = ${config.hookDevicePolicyPermitted},
+        title = "Spoof DevicePolicyManager.isLockTaskPermitted",
+        description = "Return true when the target app checks DevicePolicyManager.isLockTaskPermitted().",
+    )
+
+    val debugLogging by booleanOption(
+        key = "debugLogging",
+        default = ${config.debugLogging},
+        title = "Verbose Logcat Debug Logging",
+        description = "Emit Log.d(\\"${config.moduleName}\\", ...) traces when patched hooks intercept pinning or focus events.",
+    )
+
+    extendWith("extensions/extension.mpe")
+
+    execute {
+        val alwaysPinned = spoofTiming == "always"
+        Fingerprint(definingClass = EXTENSION_CLASS, name = "alwaysSpoofPinned")
+            .method
+            .returnEarly(alwaysPinned)
+        Fingerprint(definingClass = EXTENSION_CLASS, name = "debugLogging")
+            .method
+            .returnEarly(debugLogging == true)
+
+        if (hookActivityLockTask == true) {
+            rewriteInstanceCalls(
+                methodName = "startLockTask",
+                parameters = emptyList(),
+                returnType = "V",
+                matchesReceiver = { isActivityType(it) },
+                targetMethod = "$EXTENSION_CLASS->startLockTask(Landroid/app/Activity;)V",
+            )
+            rewriteInstanceCalls(
+                methodName = "stopLockTask",
+                parameters = emptyList(),
+                returnType = "V",
+                matchesReceiver = { isActivityType(it) },
+                targetMethod = "$EXTENSION_CLASS->stopLockTask(Landroid/app/Activity;)V",
+            )
+            rewriteStaticNoArgOrSwallow(
+                methodName = "startLockTaskModeByToken",
+                returnType = "V",
+                replacement = "$EXTENSION_CLASS->onLockTaskTokenCall()V",
+            )
+        }
+
+        if (hookActivityManagerState == true) {
+            rewriteInstanceCalls(
+                methodName = "getLockTaskModeState",
+                parameters = emptyList(),
+                returnType = "I",
+                matchesReceiver = { it == "Landroid/app/ActivityManager;" },
+                targetMethod = "$EXTENSION_CLASS->getLockTaskModeState(Landroid/app/ActivityManager;)I",
+            )
+            rewriteInstanceCalls(
+                methodName = "isInLockTaskMode",
+                parameters = emptyList(),
+                returnType = "Z",
+                matchesReceiver = { it == "Landroid/app/ActivityManager;" },
+                targetMethod = "$EXTENSION_CLASS->isInLockTaskMode(Landroid/app/ActivityManager;)Z",
+            )
+        }
+
+        if (hideFocusLoss == true) {
+            rewriteInstanceCalls(
+                methodName = "hasWindowFocus",
+                parameters = emptyList(),
+                returnType = "Z",
+                matchesReceiver = { isActivityType(it) },
+                targetMethod = "$EXTENSION_CLASS->hasWindowFocus(Landroid/app/Activity;)Z",
+            )
+            rewriteInstanceCalls(
+                methodName = "hasWindowFocus",
+                parameters = emptyList(),
+                returnType = "Z",
+                matchesReceiver = { isViewType(it) },
+                targetMethod = "$EXTENSION_CLASS->hasWindowFocus(Landroid/view/View;)Z",
+            )
+            methodCall(
+                smali = "Landroid/app/ActivityManager;->getMyMemoryState(Landroid/app/ActivityManager\\$RunningAppProcessInfo;)V"
+            ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                    replaceCallAt(
+                        index,
+                        "$EXTENSION_CLASS->getMyMemoryState(Landroid/app/ActivityManager\\$RunningAppProcessInfo;)V",
+                    )
+                }
+            }
+        }
+
+        if (hideLifecycleLoss == true) {
+            rewriteInstanceCalls(
+                methodName = "onPause",
+                parameters = emptyList(),
+                returnType = "V",
+                matchesReceiver = { isWebViewType(it) },
+                targetMethod = "$EXTENSION_CLASS->onWebViewPause(Landroid/webkit/WebView;)V",
+            )
+            rewriteInstanceCalls(
+                methodName = "pauseTimers",
+                parameters = emptyList(),
+                returnType = "V",
+                matchesReceiver = { isWebViewType(it) },
+                targetMethod = "$EXTENSION_CLASS->onWebViewPauseTimers(Landroid/webkit/WebView;)V",
+            )
+        }
+
+        if (hideMultiWindowAndPip == true) {
+            rewriteInstanceCalls(
+                methodName = "isInMultiWindowMode",
+                parameters = emptyList(),
+                returnType = "Z",
+                matchesReceiver = { isActivityType(it) },
+                targetMethod = "$EXTENSION_CLASS->isInMultiWindowMode(Landroid/app/Activity;)Z",
+            )
+            rewriteInstanceCalls(
+                methodName = "isInPictureInPictureMode",
+                parameters = emptyList(),
+                returnType = "Z",
+                matchesReceiver = { isActivityType(it) },
+                targetMethod = "$EXTENSION_CLASS->isInPictureInPictureMode(Landroid/app/Activity;)Z",
+            )
+        }
+
+        if (hookSettingsLockToApp == true) {
+            methodCall(
+                smali = "Landroid/provider/Settings\\$System;->getInt(Landroid/content/ContentResolver;Ljava/lang/String;I)I"
+            ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                    replaceCallAt(
+                        index,
+                        "$EXTENSION_CLASS->getSettingsSystemInt(Landroid/content/ContentResolver;Ljava/lang/String;I)I",
+                    )
+                }
+            }
+            methodCall(
+                smali = "Landroid/provider/Settings\\$System;->getInt(Landroid/content/ContentResolver;Ljava/lang/String;)I"
+            ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                    replaceCallAt(
+                        index,
+                        "$EXTENSION_CLASS->getSettingsSystemInt(Landroid/content/ContentResolver;Ljava/lang/String;)I",
+                    )
+                }
+            }
+        }
+
+        if (hookDevicePolicyPermitted == true) {
+            methodCall(
+                smali = "Landroid/app/admin/DevicePolicyManager;->isLockTaskPermitted(Ljava/lang/String;)Z"
+            ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                    replaceCallAt(
+                        index,
+                        "$EXTENSION_CLASS->isLockTaskPermitted(Landroid/app/admin/DevicePolicyManager;Ljava/lang/String;)Z",
+                    )
+                }
+            }
+        }
+
+        if (hideFocusLoss == true || hideLifecycleLoss == true) {
+            patchAppSubclassOverrides(
+                hideFocus = hideFocusLoss == true,
+                hideLifecycle = hideLifecycleLoss == true,
+            )
+        }
+    }
+}
+
+private fun BytecodePatchContext.isFrameworkType(type: String): Boolean =
+    type.startsWith("Landroid/") ||
+        type.startsWith("Landroidx/") ||
+        type.startsWith("Lcom/android/") ||
+        type.startsWith("Ljava/") ||
+        type.startsWith("Lkotlin/") ||
+        type.startsWith("Lkotlinx/") ||
+        type.startsWith(EXTENSION_PREFIX)
+
+private fun BytecodePatchContext.hasAncestorIn(classType: String, targets: Set<String>): Boolean {
+    var current: String? = classType
+    var depth = 0
+    while (current != null && depth < 32) {
+        if (current in targets) return true
+        val def = classDefByOrNull(current) ?: break
+        current = def.superclass
+        depth++
+    }
+    return false
+}
+
+private fun BytecodePatchContext.isActivityType(classType: String): Boolean =
+    hasAncestorIn(classType, ACTIVITY_BASE_TYPES)
+
+private fun BytecodePatchContext.isFragmentType(classType: String): Boolean =
+    hasAncestorIn(classType, FRAGMENT_BASE_TYPES)
+
+private fun BytecodePatchContext.isViewType(classType: String): Boolean =
+    hasAncestorIn(classType, VIEW_BASE_TYPES)
+
+private fun BytecodePatchContext.isWebViewType(classType: String): Boolean =
+    hasAncestorIn(classType, WEBVIEW_BASE_TYPES)
+
+private fun BytecodePatchContext.rewriteInstanceCalls(
+    methodName: String,
+    parameters: List<String>,
+    returnType: String,
+    matchesReceiver: BytecodePatchContext.(String) -> Boolean,
+    targetMethod: String,
+) {
+    methodCall(
+        name = methodName,
+        parameters = parameters,
+        returnType = returnType,
+    ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+        if (definingClass.startsWith(EXTENSION_PREFIX)) return@matchAllMethodIndicesForEach
+        val insn = getInstruction(index)
+        if (insn.opcode == Opcode.INVOKE_SUPER || insn.opcode == Opcode.INVOKE_SUPER_RANGE) {
+            return@matchAllMethodIndicesForEach
+        }
+        val ref = (insn as? ReferenceInstruction)?.reference as? MethodReference ?: return@matchAllMethodIndicesForEach
+        if (!matchesReceiver(ref.definingClass)) return@matchAllMethodIndicesForEach
+        replaceCallAt(index, targetMethod)
+    }
+}
+
+private fun BytecodePatchContext.rewriteStaticNoArgOrSwallow(
+    methodName: String,
+    returnType: String,
+    replacement: String,
+) {
+    methodCall(
+        name = methodName,
+        returnType = returnType,
+    ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+        if (definingClass.startsWith(EXTENSION_PREFIX)) return@matchAllMethodIndicesForEach
+        val ref = (getInstruction(index) as? ReferenceInstruction)?.reference as? MethodReference
+            ?: return@matchAllMethodIndicesForEach
+        if (ref.definingClass == "Landroid/app/ActivityClient;" ||
+            ref.definingClass.startsWith("Landroid/app/IActivity")
+        ) {
+            replaceInstruction(index, "invoke-static {}, $replacement")
+        }
+    }
+}
+
+private fun MutableMethod.replaceCallAt(index: Int, targetMethod: String) {
+    val insn = getInstruction(index)
+    val regs = insn.registersUsed
+    val useRange = insn.opcode.name.endsWith("_RANGE") || regs.any { it > 15 }
+    val invokeSmali = when {
+        regs.isEmpty() -> "invoke-static {}, $targetMethod"
+        useRange -> "invoke-static/range { v\${regs.first()} .. v\${regs.last()} }, $targetMethod"
+        else -> "invoke-static { \${regs.joinToString(", ") { "v$it" }} }, $targetMethod"
+    }
+    replaceInstruction(index, invokeSmali)
+}
+
+private fun BytecodePatchContext.patchAppSubclassOverrides(
+    hideFocus: Boolean,
+    hideLifecycle: Boolean,
+) {
+    val activityTargets = mutableListOf<ClassDef>()
+    val fragmentTargets = mutableListOf<ClassDef>()
+    val viewTargets = mutableListOf<ClassDef>()
+    val lifecycleCallbackTargets = mutableListOf<ClassDef>()
+    val focusListenerTargets = mutableListOf<ClassDef>()
+
+    classDefForEach { classDef ->
+        val type = classDef.type
+        if (isFrameworkType(type)) return@classDefForEach
+
+        if (isActivityType(type)) {
+            val hasActivityHook = classDef.methods.any { m ->
+                m.implementation != null && (
+                    (hideFocus && ((m.name == "onWindowFocusChanged" && m.parameterTypes == listOf("Z") && m.returnType == "V") ||
+                        (m.name == "onTopResumedActivityChanged" && m.parameterTypes == listOf("Z") && m.returnType == "V"))) ||
+                        (hideLifecycle && ((m.name == "onUserLeaveHint" && m.parameterTypes.isEmpty() && m.returnType == "V") ||
+                            (m.name == "onPause" && m.parameterTypes.isEmpty() && m.returnType == "V") ||
+                            (m.name == "onStop" && m.parameterTypes.isEmpty() && m.returnType == "V") ||
+                            (m.name == "onTopResumedActivityChanged" && m.parameterTypes == listOf("Z") && m.returnType == "V")))
+                    )
+            }
+            if (hasActivityHook) activityTargets += classDef
+        }
+
+        if (hideLifecycle && isFragmentType(type)) {
+            val hasFragHook = classDef.methods.any { m ->
+                m.implementation != null &&
+                    (m.name == "onPause" || m.name == "onStop") &&
+                    m.parameterTypes.isEmpty() &&
+                    m.returnType == "V"
+            }
+            if (hasFragHook) fragmentTargets += classDef
+        }
+
+        if (hideFocus && isViewType(type)) {
+            val hasViewHook = classDef.methods.any { m ->
+                m.implementation != null && (
+                    (m.name == "onWindowFocusChanged" && m.parameterTypes == listOf("Z") && m.returnType == "V") ||
+                        (m.name == "onWindowVisibilityChanged" && m.parameterTypes == listOf("I") && m.returnType == "V")
+                    )
+            }
+            if (hasViewHook) viewTargets += classDef
+        }
+
+        if (hideLifecycle && "Landroid/app/Application\\$ActivityLifecycleCallbacks;" in classDef.interfaces) {
+            val hasCb = classDef.methods.any { m ->
+                m.implementation != null &&
+                    (m.name == "onActivityPaused" || m.name == "onActivityStopped") &&
+                    m.parameterTypes == listOf("Landroid/app/Activity;") &&
+                    m.returnType == "V"
+            }
+            if (hasCb) lifecycleCallbackTargets += classDef
+        }
+
+        if (hideFocus && "Landroid/view/ViewTreeObserver\\$OnWindowFocusChangeListener;" in classDef.interfaces) {
+            val hasListener = classDef.methods.any { m ->
+                m.implementation != null &&
+                    m.name == "onWindowFocusChanged" &&
+                    m.parameterTypes == listOf("Z") &&
+                    m.returnType == "V"
+            }
+            if (hasListener) focusListenerTargets += classDef
+        }
+    }
+
+    activityTargets.forEach { classDef ->
+        val superType = classDef.superclass ?: "Landroid/app/Activity;"
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            when {
+                hideFocus &&
+                    method.name == "onWindowFocusChanged" &&
+                    method.parameterTypes == listOf("Z") &&
+                    method.returnType == "V" -> {
+                    skipWhenBooleanParamFalse(method)
+                }
+                (hideFocus || hideLifecycle) &&
+                    method.name == "onTopResumedActivityChanged" &&
+                    method.parameterTypes == listOf("Z") &&
+                    method.returnType == "V" -> {
+                    skipWhenBooleanParamFalse(method)
+                }
+                hideLifecycle &&
+                    method.name == "onUserLeaveHint" &&
+                    method.parameterTypes.isEmpty() &&
+                    method.returnType == "V" -> {
+                    bypassActivityLifecycleMethod(method, superType, "onUserLeaveHint", callSuper = false)
+                }
+                hideLifecycle &&
+                    method.name == "onPause" &&
+                    method.parameterTypes.isEmpty() &&
+                    method.returnType == "V" -> {
+                    bypassActivityLifecycleMethod(method, superType, "onPause", callSuper = true)
+                }
+                hideLifecycle &&
+                    method.name == "onStop" &&
+                    method.parameterTypes.isEmpty() &&
+                    method.returnType == "V" -> {
+                    bypassActivityLifecycleMethod(method, superType, "onStop", callSuper = true)
+                }
+            }
+        }
+    }
+
+    fragmentTargets.forEach { classDef ->
+        val superType = classDef.superclass ?: "Landroidx/fragment/app/Fragment;"
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if ((method.name == "onPause" || method.name == "onStop") &&
+                method.parameterTypes.isEmpty() &&
+                method.returnType == "V"
+            ) {
+                bypassFragmentLifecycleMethod(method, superType, method.name)
+            }
+        }
+    }
+
+    viewTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if (method.name == "onWindowFocusChanged" &&
+                method.parameterTypes == listOf("Z") &&
+                method.returnType == "V"
+            ) {
+                skipWhenBooleanParamFalse(method)
+            } else if (method.name == "onWindowVisibilityChanged" &&
+                method.parameterTypes == listOf("I") &&
+                method.returnType == "V"
+            ) {
+                forceWindowVisibilityVisible(method)
+            }
+        }
+    }
+
+    lifecycleCallbackTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if ((method.name == "onActivityPaused" || method.name == "onActivityStopped") &&
+                method.parameterTypes == listOf("Landroid/app/Activity;") &&
+                method.returnType == "V"
+            ) {
+                skipLifecycleCallbackIfNotFinishing(method)
+            }
+        }
+    }
+
+    focusListenerTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if (method.name == "onWindowFocusChanged" &&
+                method.parameterTypes == listOf("Z") &&
+                method.returnType == "V"
+            ) {
+                skipWhenBooleanParamFalse(method)
+            }
+        }
+    }
+
+    if (hideLifecycle) {
+        classDefByOrNull("Landroidx/lifecycle/LifecycleRegistry;")?.let { registryClass ->
+            val mutable = mutableClassDefBy(registryClass)
+            val handleMethod = mutable.methods.firstOrNull {
+                it.implementation != null &&
+                    it.name == "handleLifecycleEvent" &&
+                    it.parameterTypes == listOf("Landroidx/lifecycle/Lifecycle\\$Event;") &&
+                    it.returnType == "V"
+            }
+            if (handleMethod != null) {
+                prepareEntryScratch(handleMethod) { freeReg, _, p1Reg ->
+                    """
+                        invoke-static/range { $p1Reg .. $p1Reg }, $EXTENSION_CLASS->shouldSuppressLifecycleEvent(Ljava/lang/Object;)Z
+                        move-result $freeReg
+                        if-eqz $freeReg, :pinspoof_orig
+                        return-void
+                        :pinspoof_orig
+                        nop
+                    """.trimIndent()
+                }
+            }
+        }
+    }
+}
+
+private fun skipWhenBooleanParamFalse(method: MutableMethod) {
+    method.addInstructions(
+        0,
+        """
+            if-nez p1, :pinspoof_keep
+            return-void
+            :pinspoof_keep
+            nop
+        """.trimIndent(),
+    )
+}
+
+private fun forceWindowVisibilityVisible(method: MutableMethod) {
+    method.addInstructions(
+        0,
+        """
+            invoke-static/range { p1 .. p1 }, $EXTENSION_CLASS->filterWindowVisibility(I)I
+            move-result p1
+        """.trimIndent(),
+    )
+}
+
+private fun BytecodePatchContext.bypassActivityLifecycleMethod(
+    method: MutableMethod,
+    superType: String,
+    methodName: String,
+    callSuper: Boolean,
+) {
+    prepareEntryScratch(method) { freeReg, p0Reg, _ ->
+        val superCall = if (callSuper) {
+            "invoke-super/range { $p0Reg .. $p0Reg }, $superType->$methodName()V\\n"
+        } else {
+            ""
+        }
+        """
+            invoke-static/range { $p0Reg .. $p0Reg }, $EXTENSION_CLASS->shouldSuppressLifecycle(Landroid/app/Activity;)Z
+            move-result $freeReg
+            if-eqz $freeReg, :pinspoof_orig
+            \${superCall}return-void
+            :pinspoof_orig
+            nop
+        """.trimIndent()
+    }
+}
+
+private fun BytecodePatchContext.bypassFragmentLifecycleMethod(
+    method: MutableMethod,
+    superType: String,
+    methodName: String,
+) {
+    prepareEntryScratch(method) { freeReg, p0Reg, _ ->
+        """
+            invoke-virtual/range { $p0Reg .. $p0Reg }, $superType->getActivity()Landroid/app/Activity;
+            move-result-object $freeReg
+            invoke-static/range { $freeReg .. $freeReg }, $EXTENSION_CLASS->shouldSuppressLifecycle(Landroid/app/Activity;)Z
+            move-result $freeReg
+            if-eqz $freeReg, :pinspoof_orig
+            invoke-super/range { $p0Reg .. $p0Reg }, $superType->$methodName()V
+            return-void
+            :pinspoof_orig
+            nop
+        """.trimIndent()
+    }
+}
+
+private fun BytecodePatchContext.skipLifecycleCallbackIfNotFinishing(method: MutableMethod) {
+    prepareEntryScratch(method) { freeReg, _, p1Reg ->
+        """
+            invoke-static/range { $p1Reg .. $p1Reg }, $EXTENSION_CLASS->shouldSuppressLifecycle(Landroid/app/Activity;)Z
+            move-result $freeReg
+            if-eqz $freeReg, :pinspoof_orig
+            return-void
+            :pinspoof_orig
+            nop
+        """.trimIndent()
+    }
+}
+
+private fun BytecodePatchContext.prepareEntryScratch(
+    method: MutableMethod,
+    buildSmali: (freeReg: String, p0Reg: String, p1Reg: String) -> String,
+) {
+    val impl = method.implementation ?: return
+    val origP0 = method.p0Register
+    val paramRegs = (origP0 until impl.registerCount).toIntArray()
+    val free = runCatching { method.findFreeRegister(0, *paramRegs) }.getOrNull()
+    if (free != null && free < 256) {
+        method.addInstructions(0, buildSmali("v$free", "p0", "p1"))
+        return
+    }
+    if (impl.registerCount < 250) {
+        val cloned = method.cloneParameters()
+        val insertIdx = cloned.numberOfParameterRegistersLogical
+        cloned.addInstructions(
+            insertIdx,
+            buildSmali("p0", "v$origP0", "v\${origP0 + 1}"),
+        )
+    }
+}
+`;
+}
+
+function generateMorpheHooksJava(pkg: string): string {
+  return `package ${pkg}.extension;
+
+import android.app.Activity;
+import android.app.ActivityManager;
+import android.app.admin.DevicePolicyManager;
+import android.content.ContentResolver;
+import android.provider.Settings;
+import android.util.Log;
+import android.view.View;
+import android.webkit.WebView;
+
+/**
+ * Runtime hook targets merged into the patched APK by PinSpoof Morphe Patch.
+ * Patch-time options (ALWAYS_SPOOF_PINNED, DEBUG_LOGGING, and which hook surfaces
+ * are rewritten) are configured via Morphe Manager Patching Options.
+ */
+@SuppressWarnings({"unused", "deprecation"})
+public final class PinSpoofHooks {
+    private static final String TAG = "PinSpoof";
+    private static volatile boolean spoofedPinned = false;
+
+    private PinSpoofHooks() {
+    }
+
+    /**
+     * Overridden at patch time via PinSpoofPatch ("Always Spoof Pinned" option).
+     */
+    public static boolean alwaysSpoofPinned() {
+        return false;
+    }
+
+    /**
+     * Overridden at patch time via PinSpoofPatch ("Verbose Debug Logging" option).
+     */
+    public static boolean debugLogging() {
+        return false;
+    }
+
+    public static void log(String message) {
+        if (debugLogging()) {
+            Log.d(TAG, message);
+        }
+    }
+
+    public static void startLockTask(Activity activity) {
+        spoofedPinned = true;
+        log("Blocked real pinning via Activity.startLockTask(); spoofedPinned = true");
+    }
+
+    public static void stopLockTask(Activity activity) {
+        if (!alwaysSpoofPinned()) {
+            spoofedPinned = false;
+            log("Intercepted Activity.stopLockTask(); spoofedPinned = false");
+        } else {
+            log("Intercepted Activity.stopLockTask(); maintaining alwaysSpoofPinned = true");
+        }
+    }
+
+    public static void onLockTaskTokenCall() {
+        spoofedPinned = true;
+        log("Blocked ActivityClient/IPC startLockTaskModeByToken call");
+    }
+
+    public static int getLockTaskModeState(ActivityManager am) {
+        if (alwaysSpoofPinned() || spoofedPinned) {
+            log("ActivityManager.getLockTaskModeState() -> LOCK_TASK_MODE_PINNED (2)");
+            return ActivityManager.LOCK_TASK_MODE_PINNED;
+        }
+        return am != null ? am.getLockTaskModeState() : ActivityManager.LOCK_TASK_MODE_NONE;
+    }
+
+    public static boolean isInLockTaskMode(ActivityManager am) {
+        if (alwaysSpoofPinned() || spoofedPinned) {
+            log("ActivityManager.isInLockTaskMode() -> true");
+            return true;
+        }
+        return am != null && am.isInLockTaskMode();
+    }
+
+    public static boolean hasWindowFocus(Activity activity) {
+        log("Activity.hasWindowFocus() -> true");
+        return true;
+    }
+
+    public static boolean hasWindowFocus(View view) {
+        return true;
+    }
+
+    public static void getMyMemoryState(ActivityManager.RunningAppProcessInfo outInfo) {
+        ActivityManager.getMyMemoryState(outInfo);
+        if (outInfo != null) {
+            outInfo.importance = ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
+            log("ActivityManager.getMyMemoryState() -> IMPORTANCE_FOREGROUND");
+        }
+    }
+
+    public static int filterWindowVisibility(int visibility) {
+        if (visibility != View.VISIBLE) {
+            log("View/WebView window visibility coerced to View.VISIBLE");
+        }
+        return View.VISIBLE;
+    }
+
+    public static boolean shouldSuppressLifecycle(Activity activity) {
+        boolean suppress = activity == null || !activity.isFinishing();
+        if (suppress) {
+            log("Suppressed Activity pause/stop/Recents transition");
+        }
+        return suppress;
+    }
+
+    public static boolean shouldSuppressLifecycleEvent(Object lifecycleEvent) {
+        if (lifecycleEvent == null) {
+            return false;
+        }
+        String name = lifecycleEvent.toString();
+        boolean suppress = "ON_PAUSE".equals(name) || "ON_STOP".equals(name);
+        if (suppress) {
+            log("Suppressed LifecycleRegistry.handleLifecycleEvent(" + name + ")");
+        }
+        return suppress;
+    }
+
+    public static void onWebViewPause(WebView webView) {
+        log("Suppressed WebView.onPause()");
+    }
+
+    public static void onWebViewPauseTimers(WebView webView) {
+        log("Suppressed WebView.pauseTimers()");
+    }
+
+    public static boolean isInMultiWindowMode(Activity activity) {
+        return false;
+    }
+
+    public static boolean isInPictureInPictureMode(Activity activity) {
+        return false;
+    }
+
+    public static int getSettingsSystemInt(ContentResolver cr, String name, int def) {
+        if ("lock_to_app_enabled".equals(name)) {
+            log("Settings.System.getInt(lock_to_app_enabled) -> 1");
+            return 1;
+        }
+        return Settings.System.getInt(cr, name, def);
+    }
+
+    public static int getSettingsSystemInt(ContentResolver cr, String name)
+            throws Settings.SettingNotFoundException {
+        if ("lock_to_app_enabled".equals(name)) {
+            log("Settings.System.getInt(lock_to_app_enabled) -> 1");
+            return 1;
+        }
+        return Settings.System.getInt(cr, name);
+    }
+
+    public static boolean isLockTaskPermitted(DevicePolicyManager dpm, String pkg) {
+        log("DevicePolicyManager.isLockTaskPermitted(" + pkg + ") -> true");
+        return true;
+    }
+}
+`;
+}
+
+function generateMorphePatchesBuildGradle(config: ModuleConfig, pkg: string): string {
+  return `import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+
+group = "${pkg}"
+
+patches {
+    about {
+        name = "${config.moduleName} Patches"
+        description = "Disable app pinning, spoof LockTask pinned state, and hide focus/Recents loss via Morphe patching options."
+        source = "https://github.com/redcatxus/PinSpoof.git"
+        author = "redcatx"
+        contact = "na"
+        website = "https://github.com/redcatxus/PinSpoof"
+        license = "GPLv3"
+    }
+}
+
+val patchListGeneratorClasspath = configurations.create("patchListGeneratorClasspath")
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_11)
+    }
+}
+
+dependencies {
+    compileOnly(libs.gson)
+    patchListGeneratorClasspath(libs.gson)
+}
+
+tasks {
+    register<JavaExec>("generatePatchesList") {
+        description = "Build patch list JSON manifest from compiled .mpp bundle"
+        dependsOn("buildAndroid")
+        classpath = sourceSets["main"].runtimeClasspath + patchListGeneratorClasspath
+        mainClass.set("util.PatchListGeneratorKt")
+    }
+
+    publish {
+        dependsOn("generatePatchesList")
+    }
+}
+`;
+}
+
+function generateMorpheSettingsGradle(): string {
+  return `rootProject.name = "pinspoof-morphe-patches"
+
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        google()
+        maven {
+            name = "GitHubPackages"
+            url = uri("https://maven.pkg.github.com/MorpheApp/registry")
+            credentials {
+                username = providers.gradleProperty("gpr.user").orNull ?: System.getenv("GITHUB_ACTOR")
+                password = providers.gradleProperty("gpr.key").orNull ?: System.getenv("GITHUB_TOKEN")
+            }
+        }
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+
+plugins {
+    id("app.morphe.patches") version "2.1.1"
+}
+`;
+}
+
+function generateMorpheRootBuildGradle(config: ModuleConfig): string {
+  return `// Root build configuration for ${config.moduleName} Morphe Patches
+`;
+}
+
+function generateMorpheGradleProperties(config: ModuleConfig): string {
+  return `org.gradle.parallel = true
+org.gradle.caching = true
+org.gradle.jvmargs = -Xms512M -Xmx2048M
+android.useAndroidX = true
+kotlin.code.style = official
+kotlin.stdlib.default.dependency = false
+version = ${config.versionName}
+`;
+}
+
+function generateMorpheLibsVersionsToml(): string {
+  return `[versions]
+morphe-patcher = "2.4.0"
+#noinspection GradleDependency
+smali = "5eaff5a2c9"
+gson = "2.15.0"
+
+[libraries]
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+# Gradle plugin adds the dependency during build; declared here for version tracking.
+#noinspection UnusedVersionCatalogEntry
+morphe-patcher = { module = "app.morphe:morphe-patcher", version.ref = "morphe-patcher" }
+`;
+}
+
+function generateMorpheWrapperProperties(): string {
+  return `distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\\://services.gradle.org/distributions/gradle-9.9.1-bin.zip
+networkTimeout=10000
+retries=0
+retryBackOffMs=500
+validateDistributionUrl=true
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+`;
+}
+
+function generateMorpheExtensionBuildGradle(pkg: string): string {
+  return `extension {
+    name = "extensions/extension.mpe"
+}
+
+android {
+    namespace = "${pkg}.extension"
+}
+`;
+}
+
+function generateMorpheExtensionManifest(): string {
+  return `<manifest/>
+`;
+}
+
+function generateMorphePatchListGeneratorKt(): string {
+  return `package util
+
+import app.morphe.patcher.patch.Patch
+import app.morphe.patcher.patch.loadPatchesFromJar
+import com.google.gson.GsonBuilder
+import com.google.gson.JsonObject
+import java.io.File
+import java.net.URLClassLoader
+import java.util.jar.Manifest
+
+fun main() {
+    val patchFiles = setOf(
+        File("build/libs/").listFiles { file ->
+            val fileName = file.name
+            !fileName.contains("javadoc") &&
+                !fileName.contains("sources") &&
+                fileName.endsWith(".mpp")
+        }!!.first()
+    )
+
+    val loadedPatches = loadPatchesFromJar(patchFiles)
+    val patchClassLoader = URLClassLoader(patchFiles.map { it.toURI().toURL() }.toTypedArray())
+    val manifest = patchClassLoader.getResources("META-INF/MANIFEST.MF")
+    while (manifest.hasMoreElements()) {
+        Manifest(manifest.nextElement().openStream())
+            .mainAttributes
+            .getValue("Version")
+            ?.let { version ->
+                generatePatchList(version, loadedPatches)
+            }
+    }
+}
+
+@Suppress("DEPRECATION")
+private fun generatePatchList(version: String, patches: Set<Patch>) {
+    val listJson = File("../patches-list.json")
+    val patchesMap = patches.sortedBy { it.name }.map { patch ->
+        JsonPatch(
+            name = patch.name!!,
+            description = patch.description,
+            default = patch.default,
+            category = patch.category,
+            compatiblePackages = patch.compatibility?.map { compat ->
+                JsonCompatibility(
+                    packageName = compat.packageName!!,
+                    name = compat.name,
+                    description = compat.description,
+                    apkFileType = compat.apkFileType?.name,
+                    appIconColor = compat.appIconColor?.let { "#%06X".format(it) },
+                    signatures = compat.signatures,
+                    formFactor = compat.formFactor?.name,
+                    targets = compat.targets.map { target ->
+                        JsonCompatibility.Target(
+                            version = target.version,
+                            versionCodes = target.versionCodes?.mapKeys { it.key.name },
+                            isExperimental = target.isExperimental,
+                            minSdk = target.minSdk,
+                            description = target.description,
+                        )
+                    },
+                )
+            },
+            options = patch.options.values.map { option ->
+                JsonPatch.Option(
+                    key = option.key,
+                    title = option.title,
+                    description = option.description,
+                    required = option.required,
+                    type = option.type.toString(),
+                    default = option.default,
+                    values = option.values,
+                )
+            }
+        )
+    }
+
+    val gson = GsonBuilder()
+        .serializeNulls()
+        .disableHtmlEscaping()
+        .setPrettyPrinting()
+        .create()
+
+    val jsonObject = JsonObject()
+    jsonObject.addProperty("version", version)
+    jsonObject.add("patches", gson.toJsonTree(patchesMap))
+    listJson.writeText(gson.toJson(jsonObject))
+}
+
+@Suppress("unused")
+private class JsonPatch(
+    val name: String? = null,
+    val description: String? = null,
+    val default: Boolean = true,
+    val category: String? = null,
+    val compatiblePackages: List<JsonCompatibility>? = null,
+    val options: List<Option>,
+) {
+    class Option(
+        val key: String,
+        val title: String?,
+        val description: String?,
+        val required: Boolean,
+        val type: String,
+        val default: Any?,
+        val values: Map<String, Any?>?,
+    )
+}
+
+@Suppress("unused")
+private class JsonCompatibility(
+    val packageName: String,
+    val name: String?,
+    val description: String?,
+    val apkFileType: String?,
+    val appIconColor: String?,
+    val signatures: Set<String>?,
+    val formFactor: String?,
+    val targets: List<Target>,
+) {
+    class Target(
+        val version: String?,
+        val versionCodes: Map<String, Int>?,
+        val isExperimental: Boolean,
+        val minSdk: Int?,
+        val description: String?,
+    )
+}
 `;
 }
 
 function generateReadme(config: ModuleConfig, pkg: string): string {
   return `# ${config.moduleName}
 
-App-scoped Xposed (LSPosed / LSPatch) module targeting **Android 7.0 – Android 16 (API ${config.minSdk}–${config.targetSdk})** that:
+App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundle targeting **Android 7.0 – Android 16 (API ${config.minSdk}–${config.targetSdk})**:
 
-1. **Disables System App Pinning**: Swallows \`Activity.startLockTask()\`, \`ActivityClient.startLockTaskModeByToken()\`, and \`IActivityTaskManager$Stub$Proxy\` / \`IActivityManager$Stub$Proxy\` inside the scoped app's ART process before Binder IPC reaches \`system_server\`.
-2. **Spoofs Pinned State**: Hooks \`ActivityManager.getLockTaskModeState()\` -> \`LOCK_TASK_MODE_PINNED\` (\`2\`) and \`isInLockTaskMode()\` -> \`true\`.
-3. **Hides Focus & Recents Loss**: Suppresses \`View.dispatchWindowFocusChanged(false)\`, \`ViewTreeObserver\`, \`DecorView\`, \`WebView.onWindowVisibilityChanged\`, \`Activity.performTopResumedActivityChanged(false)\`, \`onUserLeaveHint()\`, \`onPause()\` / \`onStop()\`, \`Application.ActivityLifecycleCallbacks\`, \`LifecycleRegistry\` (\`ON_PAUSE\`/\`ON_STOP\`), forces \`hasWindowFocus() -> true\`, and keeps \`ActivityManager.getMyMemoryState()\` at \`IMPORTANCE_FOREGROUND\`.
-4. **In-App Material 3 Expressive + Material You UI**: Configure global defaults and per-app granular overrides with app icons directly inside the module app using LSPosed \`xposedsharedprefs\`.
+1. **Disables System App Pinning**: Intercepts \`Activity.startLockTask()\`, \`Activity.stopLockTask()\`, \`ActivityClient\`, and Binder \`Stub$Proxy\` calls inside the target app's ART process before IPC reaches \`system_server\`.
+2. **Spoofs Pinned State**: Spoofs \`ActivityManager.getLockTaskModeState()\` -> \`LOCK_TASK_MODE_PINNED\` (\`2\`) and \`isInLockTaskMode()\` -> \`true\`.
+3. **Hides Focus & Recents Loss**: Suppresses \`View.dispatchWindowFocusChanged(false)\`, \`ViewTreeObserver\`, \`DecorView\`, \`WebView.onWindowVisibilityChanged\`, \`WebView.onPause()\`, \`Activity.performTopResumedActivityChanged(false)\`, \`onUserLeaveHint()\`, \`onPause()\` / \`onStop()\`, \`Application.ActivityLifecycleCallbacks\`, \`LifecycleRegistry\` (\`ON_PAUSE\`/\`ON_STOP\`), forces \`hasWindowFocus() -> true\`, and keeps \`ActivityManager.getMyMemoryState()\` at \`IMPORTANCE_FOREGROUND\`.
+4. **Accessible Anywhere**:
+   - **Morphe Patching (No Root / No Xposed)**: All granular controls are exposed directly as **Morphe Patching Options** inside \`morphe-patches/\` (\`.mpp\` bundle works universally on any APK).
+   - **LSPosed Xposed + Material 3 Expressive UI**: Configure global defaults and per-app granular overrides inside the module APK via \`xposedsharedprefs\`.
 
-## Build APK
+## Option 1: Morphe Patching (No Root / No Xposed)
 
-### Option A: Android Studio (Recommended)
-1. Open this folder in **Android Studio Meerkat (2024.3.1)+** with Android SDK Platform ${config.targetSdk}.
-2. Click **Build -> Build Bundle(s) / APK(s) -> Build APK(s)**.
+1. Download the \`${config.moduleName}-morphe-patches\` artifact (\`patches-*.mpp\`) built by \`.github/workflows/build-apk.yml\`, or build locally in \`morphe-patches/\`:
+   \`\`\`bash
+   gradle :patches:buildAndroid :patches:generatePatchesList
+   \`\`\`
+2. Import \`patches-*.mpp\` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI**.
+3. Pick any target APK, open **Patching Options** on the **${config.moduleName}** patch to toggle:
+   - \`Spoof Timing Mode\` (\`reactive\` vs \`always\`)
+   - \`Disable Pinning (startLockTask / stopLockTask)\`
+   - \`Spoof ActivityManager Pin State\`
+   - \`Hide Window Focus Loss & WebView Visibility\`
+   - \`Suppress onPause / onStop / Recents Leave\`
+   - \`Hide Multi-Window & Picture-in-Picture\`
+   - \`Spoof Settings.System lock_to_app_enabled\` & \`DevicePolicyManager.isLockTaskPermitted\`
+   - \`Verbose Logcat Debug Logging\`
+4. Patch and install the modified APK.
 
-### Option B: Command Line / GitHub Actions CI
-- Local CLI (with Gradle 8.11.1 + Android SDK ${config.targetSdk}):
-  \`\`\`bash
-  gradle assembleRelease
-  \`\`\`
-- Automated CI: Push this folder to a GitHub repository — \`.github/workflows/build-apk.yml\` will automatically build and publish both debug and release APKs as workflow artifacts.
+## Option 2: LSPosed Setup
 
-## LSPosed Setup
-
-1. Install the built APK.
+1. Install the built APK (\`${config.moduleName}-apks\`).
 2. Open **LSPosed Manager** -> **Modules** -> **${config.moduleName}**.
-3. Enable the module and select **only the target apps** you want to affect.
-4. Keep **System Framework (\`android\`) UNCHECKED**.
-5. Open the **${config.moduleName}** app to customize granular toggles globally or per app, then force-stop and relaunch your target app.
+3. Enable the module and select **only the target apps** you want to affect (keep **System Framework (\`android\`) UNCHECKED**).
+4. Open the **${config.moduleName}** app to customize granular toggles globally or per app, then force-stop and relaunch your target app.
 
 Package ID: \`${pkg}\`
 Entry Class: \`${pkg}.PinSpoofModule\`
@@ -2028,6 +3187,83 @@ export function generateProjectFiles(config: ModuleConfig): GeneratedFile[] {
   const scopes = parseScopes(config.recommendedScopes);
 
   const files: GeneratedFile[] = [
+    {
+      id: 'morphe-patch-kt',
+      path: `morphe-patches/patches/src/main/kotlin/${pkgPath}/patches/PinSpoofPatch.kt`,
+      label: 'PinSpoofPatch.kt (Morphe)',
+      language: 'kotlin',
+      content: generateMorphePatchKt(config, pkg),
+    },
+    {
+      id: 'morphe-hooks-java',
+      path: `morphe-patches/extensions/extension/src/main/java/${pkgPath}/extension/PinSpoofHooks.java`,
+      label: 'PinSpoofHooks.java (Morphe)',
+      language: 'kotlin',
+      content: generateMorpheHooksJava(pkg),
+    },
+    {
+      id: 'morphe-patches-gradle',
+      path: 'morphe-patches/patches/build.gradle.kts',
+      label: 'morphe-patches/patches.kts',
+      language: 'gradle',
+      content: generateMorphePatchesBuildGradle(config, pkg),
+    },
+    {
+      id: 'morphe-settings-gradle',
+      path: 'morphe-patches/settings.gradle.kts',
+      label: 'morphe-patches/settings.kts',
+      language: 'gradle',
+      content: generateMorpheSettingsGradle(),
+    },
+    {
+      id: 'morphe-root-gradle',
+      path: 'morphe-patches/build.gradle.kts',
+      label: 'morphe-patches/build.gradle.kts',
+      language: 'gradle',
+      content: generateMorpheRootBuildGradle(config),
+    },
+    {
+      id: 'morphe-gradle-props',
+      path: 'morphe-patches/gradle.properties',
+      label: 'morphe-patches/gradle.properties',
+      language: 'properties',
+      content: generateMorpheGradleProperties(config),
+    },
+    {
+      id: 'morphe-libs-toml',
+      path: 'morphe-patches/gradle/libs.versions.toml',
+      label: 'morphe-patches/libs.versions.toml',
+      language: 'properties',
+      content: generateMorpheLibsVersionsToml(),
+    },
+    {
+      id: 'morphe-wrapper-props',
+      path: 'morphe-patches/gradle/wrapper/gradle-wrapper.properties',
+      label: 'morphe-patches/gradle-wrapper.properties',
+      language: 'properties',
+      content: generateMorpheWrapperProperties(),
+    },
+    {
+      id: 'morphe-ext-gradle',
+      path: 'morphe-patches/extensions/extension/build.gradle.kts',
+      label: 'morphe-patches/extension.kts',
+      language: 'gradle',
+      content: generateMorpheExtensionBuildGradle(pkg),
+    },
+    {
+      id: 'morphe-ext-manifest',
+      path: 'morphe-patches/extensions/extension/src/main/AndroidManifest.xml',
+      label: 'morphe-patches/extension Manifest',
+      language: 'xml',
+      content: generateMorpheExtensionManifest(),
+    },
+    {
+      id: 'morphe-patchlist-kt',
+      path: 'morphe-patches/patches/src/main/kotlin/util/PatchListGenerator.kt',
+      label: 'PatchListGenerator.kt',
+      language: 'kotlin',
+      content: generateMorphePatchListGeneratorKt(),
+    },
     {
       id: 'module-kt',
       path: `app/src/main/kotlin/${pkgPath}/PinSpoofModule.kt`,
@@ -2173,7 +3409,7 @@ export async function downloadProjectZip(config: ModuleConfig): Promise<void> {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
   anchor.href = url;
-  anchor.download = `${folderName}-xposed-module.zip`;
+  anchor.download = `${folderName}-xposed-morphe.zip`;
   document.body.appendChild(anchor);
   anchor.click();
   document.body.removeChild(anchor);

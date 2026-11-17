@@ -1,4 +1,4 @@
-name: Build PinSpoof APK
+name: Build PinSpoof APK & Morphe Patches
 
 on:
   push:
@@ -14,14 +14,16 @@ jobs:
       - name: Locate Gradle project root
         id: gradle_root
         run: |
-          SETTINGS_PATH=$(find . -maxdepth 3 -name "settings.gradle.kts" -print -quit)
-          if [ -z "$SETTINGS_PATH" ]; then
-            echo "Error: settings.gradle.kts not found in repository."
-            exit 1
+          if [ -f "settings.gradle.kts" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          else
+            SETTINGS_PATH=$(find . -maxdepth 3 -name "settings.gradle.kts" ! -path "*/morphe-patches/*" -print -quit)
+            if [ -z "$SETTINGS_PATH" ]; then
+              echo "Error: root settings.gradle.kts not found in repository."
+              exit 1
+            fi
+            echo "dir=$(dirname "$SETTINGS_PATH")" >> "$GITHUB_OUTPUT"
           fi
-          GRADLE_DIR=$(dirname "$SETTINGS_PATH")
-          echo "Found Gradle build at: $GRADLE_DIR"
-          echo "dir=$GRADLE_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -53,3 +55,61 @@ jobs:
         with:
           name: PinSpoof-apks
           path: ${{ steps.gradle_root.outputs.dir }}/app/build/outputs/apk/**/*.apk
+
+  build-morphe-patches:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Morphe Patches root
+        id: morphe_root
+        run: |
+          if [ -f "morphe-patches/settings.gradle.kts" ]; then
+            echo "dir=morphe-patches" >> "$GITHUB_OUTPUT"
+          else
+            MORPHE_SETTINGS=$(find . -maxdepth 3 -path "*/morphe-patches/settings.gradle.kts" -print -quit)
+            if [ -z "$MORPHE_SETTINGS" ]; then
+              echo "Error: morphe-patches/settings.gradle.kts not found."
+              exit 1
+            fi
+            echo "dir=$(dirname "$MORPHE_SETTINGS")" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Install Android SDK Platform 36 & Build Tools
+        run: |
+          SDKMANAGER=$(command -v sdkmanager || find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Error: sdkmanager not found under ANDROID_HOME=$ANDROID_HOME"
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Setup Gradle 9.9.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.9.1
+
+      - name: Build Morphe Patch Bundle (.mpp) & Patches List
+        working-directory: ${{ steps.morphe_root.outputs.dir }}
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gradle :patches:buildAndroid :patches:generatePatchesList --no-daemon
+
+      - name: Upload Morphe Patch Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PinSpoof-morphe-patches
+          path: |
+            ${{ steps.morphe_root.outputs.dir }}/patches/build/libs/*.mpp
+            ${{ steps.morphe_root.outputs.dir }}/patches-list.json

@@ -21,7 +21,7 @@ export function ModuleBuilder({
   isDownloading,
 }: ModuleBuilderProps) {
   const files: GeneratedFile[] = useMemo(() => generateProjectFiles(config), [config]);
-  const [selectedFileId, setSelectedFileId] = useState<string>('module-kt');
+  const [selectedFileId, setSelectedFileId] = useState<string>('morphe-patch-kt');
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const activeFile = files.find((f) => f.id === selectedFileId) ?? files[0];
@@ -111,8 +111,8 @@ export function ModuleBuilder({
     },
     {
       key: 'debugLogging',
-      label: 'LSPosed Debug Logs',
-      detail: 'Emit XposedBridge.log entries on each intercepted pinning or focus call.',
+      label: 'Verbose Debug Logs (Morphe / LSPosed)',
+      detail: 'Emit Log.d / XposedBridge.log entries on each intercepted pinning or focus call.',
     },
   ];
 
@@ -122,11 +122,11 @@ export function ModuleBuilder({
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-8">
           <div>
             <h2 className="font-display text-2xl font-semibold tracking-tight text-slate-100">
-              02. Xposed Module Builder &amp; Source Explorer
+              02. Morphe Patch &amp; Xposed Module Builder
             </h2>
             <p className="mt-1.5 text-sm text-slate-400 max-w-2xl">
-              Customize package metadata, Android 16 target SDK, Material 3 Expressive Compose UI,
-              focus-loss stealth, and hook defaults. Every change updates the Gradle project live.
+              Configure defaults for both Morphe Patching Options and the app-scoped Xposed APK.
+              Every change updates both the Morphe patch bundle and Gradle APK project live.
             </p>
           </div>
 
