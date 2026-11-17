@@ -11,11 +11,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Locate Gradle project root
+        id: gradle_root
+        run: |
+          SETTINGS_PATH=$(find . -maxdepth 3 -name "settings.gradle.kts" -print -quit)
+          if [ -z "$SETTINGS_PATH" ]; then
+            echo "Error: settings.gradle.kts not found in repository."
+            exit 1
+          fi
+          GRADLE_DIR=$(dirname "$SETTINGS_PATH")
+          echo "Found Gradle build at: $GRADLE_DIR"
+          echo "dir=$GRADLE_DIR" >> "$GITHUB_OUTPUT"
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK Platform 36 & Build Tools
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-36" "build-tools;36.0.0"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -23,11 +43,11 @@ jobs:
           gradle-version: 8.11.1
 
       - name: Build Debug & Release APKs (API 36)
+        working-directory: ${{ steps.gradle_root.outputs.dir }}
         run: gradle assembleDebug assembleRelease
 
       - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: PinSpoof-apks
-          path: app/build/outputs/apk/**/*.apk
-          
+          path: ${{ steps.gradle_root.outputs.dir }}/app/build/outputs/apk/**/*.apk
