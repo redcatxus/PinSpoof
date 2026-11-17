@@ -46,6 +46,7 @@ export function ModuleBuilder({
       ModuleConfig,
       | 'includeMaterialYouUi'
       | 'hideFocusLoss'
+      | 'hideLifecycleLoss'
       | 'hideMultiWindowAndPip'
       | 'hookActivityLockTask'
       | 'hookActivityManagerState'
@@ -65,8 +66,13 @@ export function ModuleBuilder({
     },
     {
       key: 'hideFocusLoss',
-      label: 'Hide Focus Loss & Backgrounding',
-      detail: 'Suppress DecorView.onWindowFocusChanged(false), topResumed(false), and memory importance.',
+      label: 'Hide Window Focus Loss & WebView Visibility',
+      detail: 'Suppress View.dispatchWindowFocusChanged(false), ViewTreeObserver, WebView visibility, and IMPORTANCE_FOREGROUND.',
+    },
+    {
+      key: 'hideLifecycleLoss',
+      label: 'Suppress onPause / onStop / Recents Leave',
+      detail: 'Block app onUserLeaveHint(), onPause(), onStop(), ActivityLifecycleCallbacks, and LifecycleRegistry ON_PAUSE/ON_STOP.',
     },
     {
       key: 'hideMultiWindowAndPip',

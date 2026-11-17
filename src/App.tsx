@@ -31,6 +31,7 @@ export default function App() {
         <PinSimulator
           spoofTiming={config.spoofTiming}
           hideFocusLoss={config.hideFocusLoss}
+          hideLifecycleLoss={config.hideLifecycleLoss}
           onChangeSpoofTiming={(mode) => setConfig((prev) => ({ ...prev, spoofTiming: mode }))}
         />
 

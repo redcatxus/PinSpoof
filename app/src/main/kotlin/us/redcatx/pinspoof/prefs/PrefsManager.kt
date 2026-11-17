@@ -9,6 +9,7 @@ data class GranularHookState(
     val masterEnabled: Boolean = true,
     val alwaysSpoofPinned: Boolean = HookConfig.ALWAYS_SPOOF_PINNED,
     val hideFocusLoss: Boolean = HookConfig.HIDE_FOCUS_LOSS,
+    val hideLifecycleLoss: Boolean = HookConfig.HIDE_LIFECYCLE_LOSS,
     val hideMultiWindowPip: Boolean = HookConfig.HIDE_MULTI_WINDOW_PIP,
     val hookActivityLockTask: Boolean = HookConfig.HOOK_ACTIVITY_LOCK_TASK,
     val hookActivityManagerState: Boolean = HookConfig.HOOK_ACTIVITY_MANAGER_STATE,
@@ -68,6 +69,10 @@ class PrefsManager(context: Context) {
                 "${prefix}hide_focus_loss",
                 g?.hideFocusLoss ?: HookConfig.HIDE_FOCUS_LOSS
             ),
+            hideLifecycleLoss = prefs.getBoolean(
+                "${prefix}hide_lifecycle_loss",
+                g?.hideLifecycleLoss ?: HookConfig.HIDE_LIFECYCLE_LOSS
+            ),
             hideMultiWindowPip = prefs.getBoolean(
                 "${prefix}hide_multi_window_pip",
                 g?.hideMultiWindowPip ?: HookConfig.HIDE_MULTI_WINDOW_PIP
@@ -112,6 +117,7 @@ class PrefsManager(context: Context) {
             putBoolean("${prefix}master_enabled", state.masterEnabled)
             putBoolean("${prefix}always_spoof_pinned", state.alwaysSpoofPinned)
             putBoolean("${prefix}hide_focus_loss", state.hideFocusLoss)
+            putBoolean("${prefix}hide_lifecycle_loss", state.hideLifecycleLoss)
             putBoolean("${prefix}hide_multi_window_pip", state.hideMultiWindowPip)
             putBoolean("${prefix}hook_activity_lock_task", state.hookActivityLockTask)
             putBoolean("${prefix}hook_activity_manager_state", state.hookActivityManagerState)

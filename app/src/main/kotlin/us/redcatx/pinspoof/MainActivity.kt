@@ -2,12 +2,19 @@ package us.redcatx.pinspoof
 
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -21,11 +28,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.LayersClear
+import androidx.compose.material.icons.rounded.PauseCircleOutline
 import androidx.compose.material.icons.rounded.PhonelinkLock
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.CardDefaults
@@ -53,16 +63,24 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import us.redcatx.pinspoof.prefs.GranularHookState
 import us.redcatx.pinspoof.prefs.PrefsManager
 import us.redcatx.pinspoof.ui.PinSpoofTheme
@@ -82,6 +100,63 @@ class MainActivity : ComponentActivity() {
             PinSpoofTheme {
                 PinSpoofControlScreen(prefsManager = prefsManager)
             }
+        }
+    }
+}
+
+private fun Drawable.toComposeImageBitmap(sizePx: Int = 128): ImageBitmap {
+    if (this is BitmapDrawable && bitmap != null) {
+        return bitmap.asImageBitmap()
+    }
+    val width = if (intrinsicWidth > 0) intrinsicWidth.coerceIn(48, sizePx) else sizePx
+    val height = if (intrinsicHeight > 0) intrinsicHeight.coerceIn(48, sizePx) else sizePx
+    val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = AndroidCanvas(bmp)
+    setBounds(0, 0, canvas.width, canvas.height)
+    draw(canvas)
+    return bmp.asImageBitmap()
+}
+
+@Composable
+private fun AppIconView(
+    packageName: String,
+    contentDescription: String?,
+    size: Dp = 44.dp
+) {
+    val context = LocalContext.current
+    val iconBitmap by produceState<ImageBitmap?>(initialValue = null, key1 = packageName) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                context.packageManager.getApplicationIcon(packageName).toComposeImageBitmap()
+            }.getOrNull()
+        }
+    }
+
+    val shape = RoundedCornerShape(14.dp)
+    val bmp = iconBitmap
+    if (bmp != null) {
+        Image(
+            bitmap = bmp,
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(size)
+                .clip(shape)
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(shape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Android,
+                contentDescription = contentDescription,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(size * 0.55f)
+            )
         }
     }
 }
@@ -159,17 +234,34 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Apps,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
+                            val activePkg = selectedPkg
+                            if (activePkg != null) {
+                                AppIconView(
+                                    packageName = activePkg,
+                                    contentDescription = selectedLabel,
+                                    size = 44.dp
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Apps,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = selectedLabel,
@@ -178,17 +270,21 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                Spacer(Modifier.height(2.dp))
                                 Text(
                                     text = selectedPkg ?: "Applies to all apps in LSPosed scope",
                                     style = MaterialTheme.typography.bodySmall,
                                     fontFamily = if (selectedPkg != null) FontFamily.Monospace else FontFamily.Default,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
 
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             FilledTonalButton(
                                 onClick = { showAppPicker = true },
@@ -289,7 +385,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
             }
 
-            // Focus Stealth Card
+            // Focus & Recents Stealth Card
             item {
                 ElevatedCard(shape = RoundedCornerShape(28.dp)) {
                     Column(
@@ -300,10 +396,18 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                     ) {
                         ExpressiveToggleRow(
                             icon = Icons.Rounded.VisibilityOff,
-                            title = "Hide Focus Loss & Backgrounding",
-                            subtitle = "Drop DecorView.onWindowFocusChanged(false), suppress performTopResumedActivityChanged(false), force hasWindowFocus() & IMPORTANCE_FOREGROUND",
+                            title = "Hide Window Focus Loss",
+                            subtitle = "Drop View.dispatchWindowFocusChanged(false), ViewTreeObserver, WebView visibility, topResumed(false), and force IMPORTANCE_FOREGROUND",
                             checked = hookState.hideFocusLoss,
                             onCheckedChange = { v -> updateState { it.copy(hideFocusLoss = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.PauseCircleOutline,
+                            title = "Suppress onPause / onStop / Recents",
+                            subtitle = "Block app onUserLeaveHint(), onPause(), onStop(), ActivityLifecycleCallbacks, and LifecycleRegistry ON_PAUSE/ON_STOP when opening Recents",
+                            checked = hookState.hideLifecycleLoss,
+                            onCheckedChange = { v -> updateState { it.copy(hideLifecycleLoss = v) } }
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         ExpressiveToggleRow(
@@ -324,7 +428,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         Text(
                             text = "Granular Hook Surfaces",
@@ -416,28 +520,43 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
             sheetState = sheetState
         ) {
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    text = "Select App for Granular Override",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    placeholder = { Text("Filter by app name or package ID") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(12.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Select App for Granular Override",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        placeholder = { Text("Filter by app name or package ID") },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.Search,
+                                contentDescription = null
+                            )
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(18.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                Spacer(Modifier.height(14.dp))
+
                 LazyColumn(
-                    modifier = Modifier.height(380.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(420.dp),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filtered, key = { it.packageName }) { app ->
                         Surface(
@@ -446,7 +565,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 selectedLabel = app.label
                                 showAppPicker = false
                             },
-                            shape = RoundedCornerShape(18.dp),
+                            shape = RoundedCornerShape(20.dp),
                             color = if (app.hasOverride) {
                                 MaterialTheme.colorScheme.secondaryContainer
                             } else {
@@ -456,14 +575,23 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.spacedBy(14.dp)
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
+                                AppIconView(
+                                    packageName = app.packageName,
+                                    contentDescription = app.label,
+                                    size = 44.dp
+                                )
+
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
                                     Text(
                                         text = app.label,
-                                        style = MaterialTheme.typography.bodyMedium,
+                                        style = MaterialTheme.typography.bodyLarge,
                                         fontWeight = FontWeight.Medium,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
@@ -477,18 +605,26 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
+
                                 if (app.hasOverride) {
-                                    Text(
-                                        text = "Custom",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                    ) {
+                                        Text(
+                                            text = "Custom",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(20.dp))
             }
         }
     }
@@ -505,14 +641,17 @@ private fun ExpressiveToggleRow(
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
             tint = if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleSmall,
@@ -538,9 +677,12 @@ private fun GranularSwitchItem(
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
             Text(
                 text = title,
                 style = MaterialTheme.typography.bodyMedium,

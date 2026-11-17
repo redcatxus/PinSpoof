@@ -43,6 +43,7 @@ object HookConfig {
     const val HOOK_SETTINGS_LOCK_TO_APP = ${config.hookSettingsLockToApp}
     const val HOOK_DPM_LOCK_TASK_PERMITTED = ${config.hookDevicePolicyPermitted}
     const val HIDE_FOCUS_LOSS = ${config.hideFocusLoss}
+    const val HIDE_LIFECYCLE_LOSS = ${config.hideLifecycleLoss}
     const val HIDE_MULTI_WINDOW_PIP = ${config.hideMultiWindowAndPip}
     const val DEBUG_LOGGING = ${config.debugLogging}
 }
@@ -54,21 +55,24 @@ function generatePinSpoofModuleKt(config: ModuleConfig, pkg: string): string {
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.Application
 import android.app.admin.DevicePolicyManager
 import android.content.ContentResolver
 import android.os.Build
 import android.provider.Settings
 import android.view.View
+import android.view.ViewTreeObserver
 import de.robv.android.xposed.IXposedHookLoadPackage
 import de.robv.android.xposed.XC_MethodHook
 import de.robv.android.xposed.XSharedPreferences
 import de.robv.android.xposed.XposedBridge
 import de.robv.android.xposed.XposedHelpers
 import de.robv.android.xposed.callbacks.XC_LoadPackage.LoadPackageParam
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * ${config.moduleName} — App-Scoped LockTask & Focus Stealth Module (Android 7 – 16 / API 24 – 36)
+ * ${config.moduleName} — App-Scoped LockTask & Focus/Recents Stealth Module (Android 7 – 16 / API 24 – 36)
  *
  * Strategy:
  * 1. Intercept startLockTask() / stopLockTask() and Binder IPC proxies inside the
@@ -77,13 +81,16 @@ import java.util.concurrent.atomic.AtomicBoolean
  *    pinning dialogs or back/recents lockouts.
  * 3. Spoof ActivityManager.getLockTaskModeState() -> LOCK_TASK_MODE_PINNED (2) and
  *    isInLockTaskMode() -> true.
- * 4. Optionally suppress window/activity focus-loss signals (DecorView.onWindowFocusChanged,
- *    Activity.performTopResumedActivityChanged, hasWindowFocus, and RunningAppProcessInfo)
- *    so the scoped app believes it remains focused and pinned even while backgrounded.
+ * 4. Suppress window focus-loss signals (View.dispatchWindowFocusChanged(false),
+ *    ViewTreeObserver, DecorView, WebView visibility, performTopResumedActivityChanged(false),
+ *    hasWindowFocus() -> true, RunningAppProcessInfo.IMPORTANCE_FOREGROUND) AND optionally
+ *    suppress Recents / backgrounding lifecycle callbacks (onUserLeaveHint, app Activity
+ *    onPause / onStop, Application.ActivityLifecycleCallbacks, LifecycleRegistry ON_PAUSE/ON_STOP).
  */
 class PinSpoofModule : IXposedHookLoadPackage {
 
     private val spoofedPinned = AtomicBoolean(HookConfig.ALWAYS_SPOOF_PINNED)
+    private val hookedActivityClasses = ConcurrentHashMap.newKeySet<String>()
 
     private val prefs: XSharedPreferences? by lazy {
         runCatching {
@@ -117,6 +124,12 @@ class PinSpoofModule : IXposedHookLoadPackage {
         if (!isModuleEnabled(pkg)) return false
         return isAlwaysPinned(pkg) || spoofedPinned.get()
     }
+
+    private fun shouldHideFocus(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "hide_focus_loss", HookConfig.HIDE_FOCUS_LOSS)
+
+    private fun shouldHideLifecycle(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "hide_lifecycle_loss", HookConfig.HIDE_LIFECYCLE_LOSS)
 
     private fun markPinned(pkg: String, source: String) {
         spoofedPinned.set(true)
@@ -166,6 +179,9 @@ class PinSpoofModule : IXposedHookLoadPackage {
         }
         if (readBool(pkg, "hide_focus_loss", HookConfig.HIDE_FOCUS_LOSS)) {
             hookFocusLossSpoof(lpparam)
+        }
+        if (readBool(pkg, "hide_lifecycle_loss", HookConfig.HIDE_LIFECYCLE_LOSS)) {
+            hookLifecycleStealth(lpparam)
         }
         if (readBool(pkg, "hide_multi_window_pip", HookConfig.HIDE_MULTI_WINDOW_PIP)) {
             hookMultiWindowAndPip(lpparam)
@@ -372,8 +388,39 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private fun hookFocusLossSpoof(lpparam: LoadPackageParam) {
         val pkg = lpparam.packageName
 
-        // 1. Intercept DecorView.onWindowFocusChanged(false) before Window.Callback delivers it
-        //    to any Activity subclass (even subclasses that override without calling super).
+        // 1. Drop View.dispatchWindowFocusChanged(false) at the view-tree root before
+        //    any View, WebView, ViewTreeObserver listener, or Window.Callback receives it.
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                View::class.java,
+                "dispatchWindowFocusChanged",
+                Boolean::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideFocus(pkg) && param.args[0] == false) {
+                            param.result = null
+                        }
+                    }
+                }
+            )
+        }
+
+        // 2. Drop ViewTreeObserver.dispatchOnWindowFocusChange(false)
+        runCatching {
+            XposedBridge.hookAllMethods(
+                ViewTreeObserver::class.java,
+                "dispatchOnWindowFocusChange",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideFocus(pkg) && param.args.isNotEmpty() && param.args[0] == false) {
+                            param.result = null
+                        }
+                    }
+                }
+            )
+        }
+
+        // 3. Intercept DecorView.onWindowFocusChanged(false) before Window.Callback delivers it
         val decorViewClass = XposedHelpers.findClassIfExists(
             "com.android.internal.policy.DecorView",
             lpparam.classLoader
@@ -385,8 +432,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     "onWindowFocusChanged",
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
-                            if (!readBool(pkg, "hide_focus_loss", HookConfig.HIDE_FOCUS_LOSS)) return
-                            if (param.args.isNotEmpty() && param.args[0] == false) {
+                            if (shouldHideFocus(pkg) && param.args.isNotEmpty() && param.args[0] == false) {
                                 log(pkg, "Suppressed DecorView.onWindowFocusChanged(false)")
                                 param.result = null
                             }
@@ -396,7 +442,28 @@ class PinSpoofModule : IXposedHookLoadPackage {
             }
         }
 
-        // 2. Intercept Activity.onWindowFocusChanged(false) & Activity.hasWindowFocus()
+        // 4. Keep WebView window visibility reporting View.VISIBLE so JS document.visibilityState stays visible
+        val webViewClass = XposedHelpers.findClassIfExists(
+            "android.webkit.WebView",
+            lpparam.classLoader
+        )
+        if (webViewClass != null) {
+            runCatching {
+                XposedBridge.hookAllMethods(
+                    webViewClass,
+                    "onWindowVisibilityChanged",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldHideFocus(pkg) && param.args.isNotEmpty() && param.args[0] != View.VISIBLE) {
+                                param.args[0] = View.VISIBLE
+                            }
+                        }
+                    }
+                )
+            }
+        }
+
+        // 5. Intercept Activity.onWindowFocusChanged(false) & Activity.hasWindowFocus()
         runCatching {
             XposedHelpers.findAndHookMethod(
                 Activity::class.java,
@@ -404,8 +471,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 Boolean::class.javaPrimitiveType,
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!readBool(pkg, "hide_focus_loss", HookConfig.HIDE_FOCUS_LOSS)) return
-                        if (param.args[0] == false) {
+                        if (shouldHideFocus(pkg) && param.args[0] == false) {
                             param.args[0] = true
                         }
                     }
@@ -416,7 +482,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 "hasWindowFocus",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (readBool(pkg, "hide_focus_loss", HookConfig.HIDE_FOCUS_LOSS)) {
+                        if (shouldHideFocus(pkg)) {
                             param.result = true
                         }
                     }
@@ -424,14 +490,14 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 3. Force View.hasWindowFocus() -> true
+        // 6. Force View.hasWindowFocus() -> true
         runCatching {
             XposedHelpers.findAndHookMethod(
                 View::class.java,
                 "hasWindowFocus",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (readBool(pkg, "hide_focus_loss", HookConfig.HIDE_FOCUS_LOSS)) {
+                        if (shouldHideFocus(pkg)) {
                             param.result = true
                         }
                     }
@@ -439,15 +505,14 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 4. Android 10-16 (API 29-36): suppress onTopResumedActivityChanged(false)
+        // 7. Android 10-16 (API 29-36): suppress onTopResumedActivityChanged(false)
         runCatching {
             XposedBridge.hookAllMethods(
                 Activity::class.java,
                 "performTopResumedActivityChanged",
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
-                        if (!readBool(pkg, "hide_focus_loss", HookConfig.HIDE_FOCUS_LOSS)) return
-                        if (param.args.isNotEmpty() && param.args[0] == false) {
+                        if (shouldHideFocus(pkg) && param.args.isNotEmpty() && param.args[0] == false) {
                             log(pkg, "Suppressed performTopResumedActivityChanged(false)")
                             param.result = null
                         }
@@ -456,7 +521,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 5. Spoof ActivityManager.getMyMemoryState() so process importance stays IMPORTANCE_FOREGROUND
+        // 8. Spoof ActivityManager.getMyMemoryState() so process importance stays IMPORTANCE_FOREGROUND
         runCatching {
             XposedHelpers.findAndHookMethod(
                 ActivityManager::class.java,
@@ -464,12 +529,164 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 ActivityManager.RunningAppProcessInfo::class.java,
                 object : XC_MethodHook() {
                     override fun afterHookedMethod(param: MethodHookParam) {
-                        if (!readBool(pkg, "hide_focus_loss", HookConfig.HIDE_FOCUS_LOSS)) return
+                        if (!shouldHideFocus(pkg)) return
                         val outInfo = param.args[0] as? ActivityManager.RunningAppProcessInfo ?: return
                         outInfo.importance = ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
                     }
                 }
             )
+        }
+    }
+
+    private fun hookLifecycleStealth(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+
+        // 1. Suppress Activity.performUserLeaving() so onUserLeaveHint() never triggers on Recents/Home
+        runCatching {
+            XposedBridge.hookAllMethods(
+                Activity::class.java,
+                "performUserLeaving",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideLifecycle(pkg)) {
+                            log(pkg, "Suppressed Activity.performUserLeaving()")
+                            param.result = null
+                        }
+                    }
+                }
+            )
+        }
+
+        // 2. Dynamically hook every non-framework Activity subclass's onPause(), onStop(),
+        //    onUserLeaveHint(), and onWindowFocusChanged(false) while keeping mCalled = true
+        //    so ActivityThread completes system_server Binder transactions without SuperNotCalledException.
+        runCatching {
+            XposedBridge.hookAllMethods(
+                Activity::class.java,
+                "performCreate",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        hookAppActivitySubclass(param.thisObject.javaClass, pkg)
+                    }
+                }
+            )
+        }
+
+        // 3. Suppress Application.ActivityLifecycleCallbacks paused/stopped dispatches
+        runCatching {
+            XposedBridge.hookAllMethods(
+                Application::class.java,
+                "dispatchActivityPaused",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val act = param.args.firstOrNull() as? Activity
+                        if (shouldHideLifecycle(pkg) && act?.isFinishing != true) {
+                            param.result = null
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                Application::class.java,
+                "dispatchActivityStopped",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val act = param.args.firstOrNull() as? Activity
+                        if (shouldHideLifecycle(pkg) && act?.isFinishing != true) {
+                            param.result = null
+                        }
+                    }
+                }
+            )
+        }
+
+        // 4. Suppress Jetpack LifecycleRegistry ON_PAUSE / ON_STOP (DefaultLifecycleObserver & ProcessLifecycleOwner)
+        val lifecycleRegistryClass = XposedHelpers.findClassIfExists(
+            "androidx.lifecycle.LifecycleRegistry",
+            lpparam.classLoader
+        )
+        if (lifecycleRegistryClass != null) {
+            runCatching {
+                XposedBridge.hookAllMethods(
+                    lifecycleRegistryClass,
+                    "handleLifecycleEvent",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (!shouldHideLifecycle(pkg)) return
+                            val eventName = param.args.firstOrNull()?.toString() ?: return
+                            if (eventName == "ON_PAUSE" || eventName == "ON_STOP") {
+                                log(pkg, "Suppressed LifecycleRegistry.handleLifecycleEvent($eventName)")
+                                param.result = null
+                            }
+                        }
+                    }
+                )
+            }
+        }
+    }
+
+    private fun hookAppActivitySubclass(startClass: Class<*>, pkg: String) {
+        var cls: Class<*>? = startClass
+        while (cls != null && cls != Activity::class.java) {
+            val name = cls.name
+            val isFramework = name.startsWith("android.") ||
+                name.startsWith("androidx.") ||
+                name.startsWith("com.android.") ||
+                name.startsWith("java.")
+            if (!isFramework && hookedActivityClasses.add(name)) {
+                runCatching {
+                    val onPause = cls.getDeclaredMethod("onPause")
+                    XposedBridge.hookMethod(onPause, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val act = param.thisObject as? Activity ?: return
+                            if (shouldHideLifecycle(pkg) && !act.isFinishing) {
+                                XposedHelpers.setBooleanField(act, "mCalled", true)
+                                log(pkg, "Suppressed $name.onPause()")
+                                param.result = null
+                            }
+                        }
+                    })
+                }
+                runCatching {
+                    val onStop = cls.getDeclaredMethod("onStop")
+                    XposedBridge.hookMethod(onStop, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            val act = param.thisObject as? Activity ?: return
+                            if (shouldHideLifecycle(pkg) && !act.isFinishing) {
+                                XposedHelpers.setBooleanField(act, "mCalled", true)
+                                log(pkg, "Suppressed $name.onStop()")
+                                param.result = null
+                            }
+                        }
+                    })
+                }
+                runCatching {
+                    val onUserLeaveHint = cls.getDeclaredMethod("onUserLeaveHint")
+                    XposedBridge.hookMethod(onUserLeaveHint, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldHideLifecycle(pkg)) {
+                                log(pkg, "Suppressed $name.onUserLeaveHint()")
+                                param.result = null
+                            }
+                        }
+                    })
+                }
+                runCatching {
+                    val onFocusChanged = cls.getDeclaredMethod(
+                        "onWindowFocusChanged",
+                        Boolean::class.javaPrimitiveType
+                    )
+                    XposedBridge.hookMethod(onFocusChanged, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldHideFocus(pkg) && param.args[0] == false) {
+                                log(pkg, "Suppressed $name.onWindowFocusChanged(false)")
+                                param.result = null
+                            }
+                        }
+                    })
+                }
+            }
+            cls = cls.superclass
         }
     }
 
@@ -641,6 +858,7 @@ data class GranularHookState(
     val masterEnabled: Boolean = true,
     val alwaysSpoofPinned: Boolean = HookConfig.ALWAYS_SPOOF_PINNED,
     val hideFocusLoss: Boolean = HookConfig.HIDE_FOCUS_LOSS,
+    val hideLifecycleLoss: Boolean = HookConfig.HIDE_LIFECYCLE_LOSS,
     val hideMultiWindowPip: Boolean = HookConfig.HIDE_MULTI_WINDOW_PIP,
     val hookActivityLockTask: Boolean = HookConfig.HOOK_ACTIVITY_LOCK_TASK,
     val hookActivityManagerState: Boolean = HookConfig.HOOK_ACTIVITY_MANAGER_STATE,
@@ -700,6 +918,10 @@ class PrefsManager(context: Context) {
                 "\${prefix}hide_focus_loss",
                 g?.hideFocusLoss ?: HookConfig.HIDE_FOCUS_LOSS
             ),
+            hideLifecycleLoss = prefs.getBoolean(
+                "\${prefix}hide_lifecycle_loss",
+                g?.hideLifecycleLoss ?: HookConfig.HIDE_LIFECYCLE_LOSS
+            ),
             hideMultiWindowPip = prefs.getBoolean(
                 "\${prefix}hide_multi_window_pip",
                 g?.hideMultiWindowPip ?: HookConfig.HIDE_MULTI_WINDOW_PIP
@@ -744,6 +966,7 @@ class PrefsManager(context: Context) {
             putBoolean("\${prefix}master_enabled", state.masterEnabled)
             putBoolean("\${prefix}always_spoof_pinned", state.alwaysSpoofPinned)
             putBoolean("\${prefix}hide_focus_loss", state.hideFocusLoss)
+            putBoolean("\${prefix}hide_lifecycle_loss", state.hideLifecycleLoss)
             putBoolean("\${prefix}hide_multi_window_pip", state.hideMultiWindowPip)
             putBoolean("\${prefix}hook_activity_lock_task", state.hookActivityLockTask)
             putBoolean("\${prefix}hook_activity_manager_state", state.hookActivityManagerState)
@@ -763,12 +986,19 @@ function generateMainActivityKt(config: ModuleConfig, pkg: string): string {
 
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas as AndroidCanvas
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -782,11 +1012,14 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.LayersClear
+import androidx.compose.material.icons.rounded.PauseCircleOutline
 import androidx.compose.material.icons.rounded.PhonelinkLock
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material3.CardDefaults
@@ -814,16 +1047,24 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import ${pkg}.prefs.GranularHookState
 import ${pkg}.prefs.PrefsManager
 import ${pkg}.ui.PinSpoofTheme
@@ -843,6 +1084,63 @@ class MainActivity : ComponentActivity() {
             PinSpoofTheme {
                 PinSpoofControlScreen(prefsManager = prefsManager)
             }
+        }
+    }
+}
+
+private fun Drawable.toComposeImageBitmap(sizePx: Int = 128): ImageBitmap {
+    if (this is BitmapDrawable && bitmap != null) {
+        return bitmap.asImageBitmap()
+    }
+    val width = if (intrinsicWidth > 0) intrinsicWidth.coerceIn(48, sizePx) else sizePx
+    val height = if (intrinsicHeight > 0) intrinsicHeight.coerceIn(48, sizePx) else sizePx
+    val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = AndroidCanvas(bmp)
+    setBounds(0, 0, canvas.width, canvas.height)
+    draw(canvas)
+    return bmp.asImageBitmap()
+}
+
+@Composable
+private fun AppIconView(
+    packageName: String,
+    contentDescription: String?,
+    size: Dp = 44.dp
+) {
+    val context = LocalContext.current
+    val iconBitmap by produceState<ImageBitmap?>(initialValue = null, key1 = packageName) {
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                context.packageManager.getApplicationIcon(packageName).toComposeImageBitmap()
+            }.getOrNull()
+        }
+    }
+
+    val shape = RoundedCornerShape(14.dp)
+    val bmp = iconBitmap
+    if (bmp != null) {
+        Image(
+            bitmap = bmp,
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Crop,
+            modifier = Modifier
+                .size(size)
+                .clip(shape)
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(shape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Android,
+                contentDescription = contentDescription,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(size * 0.55f)
+            )
         }
     }
 }
@@ -920,17 +1218,34 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            horizontalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Apps,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
+                            val activePkg = selectedPkg
+                            if (activePkg != null) {
+                                AppIconView(
+                                    packageName = activePkg,
+                                    contentDescription = selectedLabel,
+                                    size = 44.dp
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .size(44.dp)
+                                        .clip(RoundedCornerShape(14.dp))
+                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Apps,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
                                     text = selectedLabel,
@@ -939,17 +1254,21 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                Spacer(Modifier.height(2.dp))
                                 Text(
                                     text = selectedPkg ?: "Applies to all apps in LSPosed scope",
                                     style = MaterialTheme.typography.bodySmall,
                                     fontFamily = if (selectedPkg != null) FontFamily.Monospace else FontFamily.Default,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
 
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
                             FilledTonalButton(
                                 onClick = { showAppPicker = true },
@@ -1050,7 +1369,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
             }
 
-            // Focus Stealth Card
+            // Focus & Recents Stealth Card
             item {
                 ElevatedCard(shape = RoundedCornerShape(28.dp)) {
                     Column(
@@ -1061,10 +1380,18 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                     ) {
                         ExpressiveToggleRow(
                             icon = Icons.Rounded.VisibilityOff,
-                            title = "Hide Focus Loss & Backgrounding",
-                            subtitle = "Drop DecorView.onWindowFocusChanged(false), suppress performTopResumedActivityChanged(false), force hasWindowFocus() & IMPORTANCE_FOREGROUND",
+                            title = "Hide Window Focus Loss",
+                            subtitle = "Drop View.dispatchWindowFocusChanged(false), ViewTreeObserver, WebView visibility, topResumed(false), and force IMPORTANCE_FOREGROUND",
                             checked = hookState.hideFocusLoss,
                             onCheckedChange = { v -> updateState { it.copy(hideFocusLoss = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.PauseCircleOutline,
+                            title = "Suppress onPause / onStop / Recents",
+                            subtitle = "Block app onUserLeaveHint(), onPause(), onStop(), ActivityLifecycleCallbacks, and LifecycleRegistry ON_PAUSE/ON_STOP when opening Recents",
+                            checked = hookState.hideLifecycleLoss,
+                            onCheckedChange = { v -> updateState { it.copy(hideLifecycleLoss = v) } }
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         ExpressiveToggleRow(
@@ -1085,7 +1412,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         Text(
                             text = "Granular Hook Surfaces",
@@ -1177,28 +1504,43 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
             sheetState = sheetState
         ) {
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp)
+                modifier = Modifier.fillMaxWidth()
             ) {
-                Text(
-                    text = "Select App for Granular Override",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    placeholder = { Text("Filter by app name or package ID") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(16.dp),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(12.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Select App for Granular Override",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { query = it },
+                        placeholder = { Text("Filter by app name or package ID") },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Rounded.Search,
+                                contentDescription = null
+                            )
+                        },
+                        singleLine = true,
+                        shape = RoundedCornerShape(18.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+
+                Spacer(Modifier.height(14.dp))
+
                 LazyColumn(
-                    modifier = Modifier.height(380.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(420.dp),
+                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filtered, key = { it.packageName }) { app ->
                         Surface(
@@ -1207,7 +1549,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 selectedLabel = app.label
                                 showAppPicker = false
                             },
-                            shape = RoundedCornerShape(18.dp),
+                            shape = RoundedCornerShape(20.dp),
                             color = if (app.hasOverride) {
                                 MaterialTheme.colorScheme.secondaryContainer
                             } else {
@@ -1217,14 +1559,23 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    .padding(horizontal = 16.dp, vertical = 14.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
+                                horizontalArrangement = Arrangement.spacedBy(14.dp)
                             ) {
-                                Column(modifier = Modifier.weight(1f)) {
+                                AppIconView(
+                                    packageName = app.packageName,
+                                    contentDescription = app.label,
+                                    size = 44.dp
+                                )
+
+                                Column(
+                                    modifier = Modifier.weight(1f),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                ) {
                                     Text(
                                         text = app.label,
-                                        style = MaterialTheme.typography.bodyMedium,
+                                        style = MaterialTheme.typography.bodyLarge,
                                         fontWeight = FontWeight.Medium,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis
@@ -1238,18 +1589,26 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                         overflow = TextOverflow.Ellipsis
                                     )
                                 }
+
                                 if (app.hasOverride) {
-                                    Text(
-                                        text = "Custom",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
+                                    Surface(
+                                        shape = RoundedCornerShape(10.dp),
+                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                    ) {
+                                        Text(
+                                            text = "Custom",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                        )
+                                    }
                                 }
                             }
                         }
                     }
                 }
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(20.dp))
             }
         }
     }
@@ -1266,14 +1625,17 @@ private fun ExpressiveToggleRow(
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
         Icon(
             imageVector = icon,
             contentDescription = null,
             tint = if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
         )
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleSmall,
@@ -1299,9 +1661,12 @@ private fun GranularSwitchItem(
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
+        horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
             Text(
                 text = title,
                 style = MaterialTheme.typography.bodyMedium,
@@ -1628,8 +1993,8 @@ App-scoped Xposed (LSPosed / LSPatch) module targeting **Android 7.0 – Android
 
 1. **Disables System App Pinning**: Swallows \`Activity.startLockTask()\`, \`ActivityClient.startLockTaskModeByToken()\`, and \`IActivityTaskManager$Stub$Proxy\` / \`IActivityManager$Stub$Proxy\` inside the scoped app's ART process before Binder IPC reaches \`system_server\`.
 2. **Spoofs Pinned State**: Hooks \`ActivityManager.getLockTaskModeState()\` -> \`LOCK_TASK_MODE_PINNED\` (\`2\`) and \`isInLockTaskMode()\` -> \`true\`.
-3. **Hides Focus Loss**: Suppresses \`DecorView.onWindowFocusChanged(false)\`, \`Activity.performTopResumedActivityChanged(false)\`, forces \`hasWindowFocus() -> true\`, and keeps \`ActivityManager.getMyMemoryState()\` at \`IMPORTANCE_FOREGROUND\`.
-4. **In-App Material 3 Expressive + Material You UI**: Configure global defaults and per-app granular overrides directly inside the module app using LSPosed \`xposedsharedprefs\`.
+3. **Hides Focus & Recents Loss**: Suppresses \`View.dispatchWindowFocusChanged(false)\`, \`ViewTreeObserver\`, \`DecorView\`, \`WebView.onWindowVisibilityChanged\`, \`Activity.performTopResumedActivityChanged(false)\`, \`onUserLeaveHint()\`, \`onPause()\` / \`onStop()\`, \`Application.ActivityLifecycleCallbacks\`, \`LifecycleRegistry\` (\`ON_PAUSE\`/\`ON_STOP\`), forces \`hasWindowFocus() -> true\`, and keeps \`ActivityManager.getMyMemoryState()\` at \`IMPORTANCE_FOREGROUND\`.
+4. **In-App Material 3 Expressive + Material You UI**: Configure global defaults and per-app granular overrides with app icons directly inside the module app using LSPosed \`xposedsharedprefs\`.
 
 ## Build APK
 

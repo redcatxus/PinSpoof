@@ -19,6 +19,7 @@ object HookConfig {
     const val HOOK_SETTINGS_LOCK_TO_APP = false
     const val HOOK_DPM_LOCK_TASK_PERMITTED = false
     const val HIDE_FOCUS_LOSS = true
+    const val HIDE_LIFECYCLE_LOSS = true
     const val HIDE_MULTI_WINDOW_PIP = true
     const val DEBUG_LOGGING = true
 }

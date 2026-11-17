@@ -12,12 +12,14 @@ interface TraceEntry {
 interface PinSimulatorProps {
   spoofTiming: SpoofTimingMode;
   hideFocusLoss: boolean;
+  hideLifecycleLoss: boolean;
   onChangeSpoofTiming: (mode: SpoofTimingMode) => void;
 }
 
 export function PinSimulator({
   spoofTiming,
   hideFocusLoss,
+  hideLifecycleLoss,
   onChangeSpoofTiming,
 }: PinSimulatorProps) {
   const [stockPinned, setStockPinned] = useState(false);
@@ -86,19 +88,23 @@ export function PinSimulator({
     const nextBg = !backgrounded;
     setBackgrounded(nextBg);
     setLastCallLabel(
-      nextBg ? 'User switched app / pulled shade' : 'User returned to target app'
+      nextBg ? 'User opened Recents / switched app' : 'User returned to target app'
     );
     appendTrace({
       call: nextBg
-        ? 'DecorView.onWindowFocusChanged(false) + topResumed(false)'
+        ? 'Recents / Focus Loss (onUserLeaveHint, onPause, dispatchWindowFocusChanged(false))'
         : 'DecorView.onWindowFocusChanged(true)',
       stockResult: nextBg
-        ? 'hasWindowFocus()=false, IMPORTANCE_CACHED'
+        ? 'hasWindowFocus()=false, onPause/onStop fired, IMPORTANCE_CACHED'
         : 'hasWindowFocus()=true, IMPORTANCE_FOREGROUND',
       spoofResult: nextBg
-        ? hideFocusLoss
-          ? 'Dropped false callbacks; hasWindowFocus()=true, IMPORTANCE_FOREGROUND'
-          : 'Focus loss passed through (hideFocusLoss disabled)'
+        ? hideFocusLoss && hideLifecycleLoss
+          ? 'Dropped false focus, WebView visibility & onPause/onStop/onUserLeaveHint'
+          : hideFocusLoss
+            ? 'Dropped false focus; onPause/onStop passed through (hideLifecycleLoss off)'
+            : hideLifecycleLoss
+              ? 'Suppressed onPause/onStop; focus loss passed through (hideFocusLoss off)'
+              : 'Focus & lifecycle events passed through'
         : 'hasWindowFocus()=true, IMPORTANCE_FOREGROUND',
     });
   };

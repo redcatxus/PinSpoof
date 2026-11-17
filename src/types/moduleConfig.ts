@@ -15,6 +15,7 @@ export interface ModuleConfig {
   hookSettingsLockToApp: boolean;
   hookDevicePolicyPermitted: boolean;
   hideFocusLoss: boolean;
+  hideLifecycleLoss: boolean;
   hideMultiWindowAndPip: boolean;
   includeMaterialYouUi: boolean;
   debugLogging: boolean;
@@ -44,6 +45,7 @@ export const DEFAULT_MODULE_CONFIG: ModuleConfig = {
   hookSettingsLockToApp: false,
   hookDevicePolicyPermitted: false,
   hideFocusLoss: true,
+  hideLifecycleLoss: true,
   hideMultiWindowAndPip: true,
   includeMaterialYouUi: true,
   debugLogging: true,
