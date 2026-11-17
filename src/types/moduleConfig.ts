@@ -30,7 +30,7 @@ export interface GeneratedFile {
 }
 
 export const DEFAULT_MODULE_CONFIG: ModuleConfig = {
-  packageName: 'io.github.pinspoof',
+  packageName: 'us.redcatx.pinspoof',
   moduleName: 'PinSpoof',
   versionName: '1.1.0',
   versionCode: 2,

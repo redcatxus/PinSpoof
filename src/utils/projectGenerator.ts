@@ -9,7 +9,7 @@ function sanitizePackageName(raw: string): string {
     .replace(/\.{2,}/g, '.')
     .replace(/^\.+|\.+$/g, '');
   if (!cleaned || !cleaned.includes('.')) {
-    return 'io.github.pinspoof';
+    return 'us.redcatx.pinspoof';
   }
   return cleaned;
 }
@@ -1559,6 +1559,7 @@ function generateProguardRules(pkg: string): string {
 }
 
 function generateGithubWorkflow(config: ModuleConfig): string {
+  const folderName = config.moduleName.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'PinSpoof';
   return `name: Build ${config.moduleName} APK
 
 on:
@@ -1572,11 +1573,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Locate Gradle project root
+        id: gradle_root
+        run: |
+          SETTINGS_PATH=$(find . -maxdepth 3 -name "settings.gradle.kts" -print -quit)
+          if [ -z "$SETTINGS_PATH" ]; then
+            echo "Error: settings.gradle.kts not found in repository."
+            exit 1
+          fi
+          GRADLE_DIR=$(dirname "$SETTINGS_PATH")
+          echo "Found Gradle build at: $GRADLE_DIR"
+          echo "dir=$GRADLE_DIR" >> "$GITHUB_OUTPUT"
+
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK Platform ${config.targetSdk} & Build Tools
+        run: |
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          sdkmanager "platforms;android-${config.targetSdk}" "build-tools;${config.targetSdk}.0.0"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -1584,13 +1605,14 @@ jobs:
           gradle-version: 8.11.1
 
       - name: Build Debug & Release APKs (API ${config.targetSdk})
+        working-directory: \${{ steps.gradle_root.outputs.dir }}
         run: gradle assembleDebug assembleRelease
 
       - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${config.moduleName}-apks
-          path: app/build/outputs/apk/**/*.apk
+          name: ${folderName}-apks
+          path: \${{ steps.gradle_root.outputs.dir }}/app/build/outputs/apk/**/*.apk
 `;
 }
 
@@ -1771,12 +1793,10 @@ export function generateProjectFiles(config: ModuleConfig): GeneratedFile[] {
 export async function downloadProjectZip(config: ModuleConfig): Promise<void> {
   const zip = new JSZip();
   const folderName = config.moduleName.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'PinSpoof';
-  const root = zip.folder(folderName);
-  if (!root) return;
 
   const files = generateProjectFiles(config);
   for (const file of files) {
-    root.file(file.path, file.content);
+    zip.file(file.path, file.content);
   }
 
   const blob = await zip.generateAsync({ type: 'blob' });
