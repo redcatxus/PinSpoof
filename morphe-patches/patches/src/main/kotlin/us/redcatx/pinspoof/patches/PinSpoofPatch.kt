@@ -52,7 +52,7 @@ private val WEBVIEW_BASE_TYPES = setOf(
 val pinSpoofPatch = bytecodePatch(
     name = "PinSpoof",
     description = "Disables app pinning (LockTask), spoofs pinned state, and hides focus/Recents loss directly in patched APKs without root or Xposed.",
-    default = true,
+    default = false,
 ) {
     val spoofTiming by stringOption(
         key = "spoofTiming",

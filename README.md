@@ -48,4 +48,4 @@ Entry Class: `us.redcatx.pinspoof.PinSpoofModule`
 
 ## Disclaimer
 
-This software is provided **"as-is"**, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. Use it responsibly and solely on devices and software where you are authorized to do so.
+This project was created with the assistance of Artificial Intelligence. This software is provided **"as-is"**, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. Should you encounter any issues or have suggestions for improvements, you are free to fork this repository and implement your own ideas. Use it responsibly and solely on devices and software where you are authorized to do so.
