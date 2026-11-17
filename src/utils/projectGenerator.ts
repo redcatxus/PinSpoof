@@ -657,21 +657,23 @@ class PrefsManager(context: Context) {
     private val prefs: SharedPreferences
 
     init {
-        var worldReadableOk = false
-        @Suppress("DEPRECATION")
-        @SuppressLint("WorldReadableFiles")
-        val sp = try {
+        val (sp, worldOk) = openPrefs(context)
+        isWorldReadableActive = worldOk
+        prefs = sp
+    }
+
+    @Suppress("DEPRECATION")
+    @SuppressLint("WorldReadableFiles")
+    private fun openPrefs(context: Context): Pair<SharedPreferences, Boolean> {
+        return try {
             val worldPrefs = context.getSharedPreferences(
                 HookConfig.PREFS_NAME,
                 Context.MODE_WORLD_READABLE
             )
-            worldReadableOk = true
-            worldPrefs
+            worldPrefs to true
         } catch (_: SecurityException) {
-            context.getSharedPreferences(HookConfig.PREFS_NAME, Context.MODE_PRIVATE)
+            context.getSharedPreferences(HookConfig.PREFS_NAME, Context.MODE_PRIVATE) to false
         }
-        isWorldReadableActive = worldReadableOk
-        prefs = sp
     }
 
     fun hasPerAppOverride(packageName: String): Boolean =
@@ -1438,7 +1440,7 @@ function generateAppBuildGradle(config: ModuleConfig, pkg: string): string {
 
   const composeDeps = config.includeMaterialYouUi
     ? `
-    implementation(platform("androidx.compose:compose-bom:2025.05.00"))
+    implementation(platform("androidx.compose:compose-bom:2026.05.00"))
     implementation("androidx.activity:activity-compose:1.10.1")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
@@ -1554,6 +1556,7 @@ function generateProguardRules(pkg: string): string {
   return `# Keep the Xposed entry class referenced by assets/xposed_init
 -keep class ${pkg}.PinSpoofModule { *; }
 -keep class ${pkg}.HookConfig { *; }
+-keep class ${pkg}.prefs.** { *; }
 -dontwarn de.robv.android.xposed.**
 `;
 }

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Add package names here if you want LSPosed to suggest recommended target apps.
+         Never add "android" — this module operates strictly inside app processes. -->
+    <string-array name="xposed_scope" />
+</resources>

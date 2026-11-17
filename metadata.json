@@ -2,5 +2,7 @@
   "name": "PinSpoof Xposed Module Studio",
   "description": "App-scoped Xposed (LSPosed) module generator and call-flow simulator that disables Android app pinning while spoofing pinned state without scoping system_server.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

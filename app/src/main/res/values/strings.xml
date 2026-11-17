@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">PinSpoof</string>
+    <string name="xposed_description">Disables system app pinning, spoofs LockTask pinned state, and hides focus loss inside scoped app processes (Android 7–16, no system_server scope).</string>
+</resources>
