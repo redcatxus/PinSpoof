@@ -680,15 +680,15 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         ExpressiveToggleRow(
                             icon = Icons.Rounded.Language,
                             title = "WebView Visibility, JS & Pause Stealth",
-                            subtitle = "Force View.VISIBLE, block WebView.onPause()/pauseTimers(), and spoof JS document.hidden / visibilityState / blur",
+                            subtitle = "Force View.VISIBLE, block WebView.onPause()/pauseTimers()/onVisibilityAggregated(false), and spoof JS visibility/blur",
                             checked = hookState.hideWebViewVisibility,
                             onCheckedChange = { v -> updateState { it.copy(hideWebViewVisibility = v) } }
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         ExpressiveToggleRow(
                             icon = Icons.Rounded.PauseCircleOutline,
-                            title = "Suppress onPause / onStop (Advanced)",
-                            subtitle = "OFF by default: blocking Activity/LifecycleRegistry transitions can stall SurfaceView/TextureView graphics on resume",
+                            title = "Suppress onPause / onStop",
+                            subtitle = "Block Activity/Fragment/LifecycleRegistry transitions to hide Recents & switching (disable or use Light preset if a SurfaceView/game stalls)",
                             checked = hookState.hideLifecycleLoss,
                             onCheckedChange = { v -> updateState { it.copy(hideLifecycleLoss = v) } }
                         )
@@ -905,7 +905,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
 
     // Inline Expandable App Rules + Per-App Presets Sheet
     if (showAppPicker) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
         var query by remember { mutableStateOf("") }
         var expandedPkg by remember { mutableStateOf<String?>(selectedPkg) }
         val appStatesMap = remember { mutableStateMapOf<String, GranularHookState>() }
@@ -949,7 +949,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
             onDismissRequest = { showAppPicker = false },
             sheetState = sheetState
         ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.fillMaxSize()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -987,8 +987,8 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(460.dp),
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
+                        .weight(1f),
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filtered, key = { it.packageName }) { app ->
@@ -1206,14 +1206,13 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         }
                     }
                 }
-                Spacer(Modifier.height(20.dp))
             }
         }
     }
 
     // Live Hook Event Log Drawer (opened by tapping any StatTile)
     if (showEventLogSheet) {
-        val logSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val logSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
         val filterChips = listOf(
             "all" to "All",
             "pin" to "Pinning",
@@ -1234,7 +1233,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .fillMaxSize()
                     .padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
@@ -1282,33 +1281,36 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                     }
                 }
 
-                if (filteredEntries.isEmpty()) {
-                    Surface(
-                        shape = RoundedCornerShape(18.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = "No hook events recorded for this filter yet. Launch a scoped target app and trigger pinning or focus transitions.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(16.dp)
-                        )
-                    }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(360.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(filteredEntries) { entry ->
-                            EventLogRow(entry = entry, formattedTime = timeFmt.format(Date(entry.timestampMs)))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    if (filteredEntries.isEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "No hook events recorded for this filter yet. Launch a scoped target app and trigger pinning or focus transitions.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = 24.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(filteredEntries) { entry ->
+                                EventLogRow(entry = entry, formattedTime = timeFmt.format(Date(entry.timestampMs)))
+                            }
                         }
                     }
                 }
-
-                Spacer(Modifier.height(16.dp))
             }
         }
     }

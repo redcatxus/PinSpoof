@@ -9,7 +9,7 @@ import us.redcatx.pinspoof.HookConfig
 
 enum class HookPreset(val label: String, val summary: String) {
     LIGHT("Light", "Pinning bypass & state spoof only"),
-    BALANCED("Balanced", "Safe defaults: pinning + focus + multi-window"),
+    BALANCED("Balanced", "Default stealth: pinning + focus + WebView + lifecycle"),
     AGGRESSIVE("Aggressive", "All stealth, anti-detection, display & UI hooks")
 }
 
@@ -70,8 +70,8 @@ data class GranularHookState(
             masterEnabled = true,
             alwaysSpoofPinned = false,
             hideFocusLoss = true,
-            hideWebViewVisibility = false,
-            hideLifecycleLoss = false,
+            hideWebViewVisibility = true,
+            hideLifecycleLoss = true,
             hideMultiWindowPip = true,
             spoofPinnedInsets = false,
             stripFlagSecure = false,

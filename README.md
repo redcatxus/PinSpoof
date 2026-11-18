@@ -1,6 +1,6 @@
 # PinSpoof
 
-App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundle (`PinSpoof-v1.3.0.apk` / `PinSpoof-v1.3.0.mpp`) targeting **Android 7.0 – Android 16 (API 24–36)**:
+App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundle (`PinSpoof-v1.3.1.apk` / `PinSpoof-v1.3.1.mpp`) targeting **Android 7.0 – Android 16 (API 24–36)**:
 
 1. **Disables System App Pinning**: Intercepts `Activity.startLockTask()`, `Activity.stopLockTask()`, `ActivityClient`, and optional Binder `Stub$Proxy` calls (with dynamic OEM-safe method scanning) locally within the target app's ART process without modifying `system_server`.
 2. **Emulates Pinned State**: Reports `ActivityManager.getLockTaskModeState()` -> `LOCK_TASK_MODE_PINNED` (`2`) and `isInLockTaskMode()` -> `true` in safe **Reactive** mode by default (or optional **Always Pinned**), alongside optional `Settings.System` (`lock_to_app_enabled`) and `DevicePolicyManager.isLockTaskPermitted()` overrides.
@@ -14,7 +14,7 @@ App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundl
    - **Stack Trace Sanitization & Motion Sensors**: Strip hook frames from `Thread` / `Throwable.getStackTrace()` and clamp accelerometer/gyroscope readings to resting desk values.
    - **Signature & Play Integrity Handling**: Optional `PackageInfo.signatures` / `SigningInfo` replacement via Certificate DER Hex and soft-fail clearing on Integrity / SafetyNet `Task.getException()`.
 5. **Accessible Anywhere**:
-   - **Morphe Patching (No Root / No Xposed)**: All controls are exposed directly as **Morphe Patching Options** inside `PinSpoof-v1.3.0.mpp` (universal patch, works on any APK).
+   - **Morphe Patching (No Root / No Xposed)**: All controls are exposed directly as **Morphe Patching Options** inside `PinSpoof-v1.3.1.mpp` (universal patch, works on any APK).
    - **LSPosed Xposed + Material 3 Expressive UI**: Inline expandable per-app rules & presets (`Light`, `Balanced`, `Aggressive`), JSON export/import, and a tappable **Live Hook Event Counter** & method event log drawer via `xposedsharedprefs`.
 
 ## Practical Usage
@@ -30,11 +30,11 @@ PinSpoof lets you stay in control of multitasking and system navigation without 
 
 > **Note:** Morphe re-signs the patched APK. Apps that enforce signature verification can use **Static Package Signature Spoof** with your original certificate DER hex, or use **Option 2 (LSPosed)**.
 
-1. Download the `PinSpoof-morphe-patches` artifact (`PinSpoof-v1.3.0.mpp`) built by `.github/workflows/build-apk.yml`, or build locally in `morphe-patches/`:
+1. Download the `PinSpoof-morphe-patches` artifact (`PinSpoof-v1.3.1.mpp`) built by `.github/workflows/build-apk.yml`, or build locally in `morphe-patches/`:
    ```bash
    gradle :patches:buildAndroid :patches:generatePatchesList
    ```
-2. Import `PinSpoof-v1.3.0.mpp` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI**.
+2. Import `PinSpoof-v1.3.1.mpp` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI**.
 3. Pick any target APK, open **Patching Options** on the **PinSpoof** universal patch to configure:
    - **`Spoof Timing Mode`**: `Reactive (after startLockTask)` (default) or `Always Pinned (from launch)`.
    - **`Disable Pinning (startLockTask / stopLockTask)`** & **`Binder Stub$Proxy LockTask Interception`**.
@@ -47,7 +47,7 @@ PinSpoof lets you stay in control of multitasking and system navigation without 
 
 ## Option 2: LSPosed Setup
 
-1. Install `PinSpoof-v1.3.0.apk` (from `PinSpoof-apks`).
+1. Install `PinSpoof-v1.3.1.apk` (from `PinSpoof-apks`).
 2. Open **LSPosed Manager** -> **Modules** -> **PinSpoof**.
 3. Enable the module and select **only the target apps** you want to affect (keep **System Framework (`android`) UNCHECKED**).
 4. Open **PinSpoof**, tap **Select App Override** to expand inline per-app rules/presets (`Light` / `Balanced` / `Aggressive`), import/export JSON configs, or tap any **Live Hook Event Counter** tile to inspect triggered methods, then force-stop and relaunch your target app.

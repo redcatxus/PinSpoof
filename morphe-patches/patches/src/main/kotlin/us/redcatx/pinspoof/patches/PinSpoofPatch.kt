@@ -107,16 +107,16 @@ val pinSpoofPatch = bytecodePatch(
 
     val hideWebViewVisibility by booleanOption(
         key = "hideWebViewVisibility",
-        default = false,
+        default = true,
         title = "WebView Visibility, JS & Pause Stealth",
-        description = "Force WebView visibility VISIBLE, block WebView.onPause()/pauseTimers(), and inject DOM Page Visibility / blur stealth JS.",
+        description = "Force WebView visibility VISIBLE, block WebView.onPause()/pauseTimers()/onVisibilityAggregated(false), and inject DOM visibility/blur stealth JS.",
     )
 
     val hideLifecycleLoss by booleanOption(
         key = "hideLifecycleLoss",
-        default = false,
-        title = "Suppress onPause / onStop (Advanced)",
-        description = "OFF by default: block Activity/Fragment onPause(), onStop(), ActivityLifecycleCallbacks, and LifecycleRegistry transitions.",
+        default = true,
+        title = "Suppress onPause / onStop",
+        description = "Block Activity/Fragment onPause(), onStop(), ActivityLifecycleCallbacks, and LifecycleRegistry transitions (disable if a SurfaceView/game stalls on resume).",
     )
 
     val hideMultiWindowAndPip by booleanOption(
@@ -316,6 +316,13 @@ val pinSpoofPatch = bytecodePatch(
                 matchesReceiver = { isViewType(it) },
                 targetMethod = "$EXTENSION_CLASS->hasWindowFocus(Landroid/view/View;)Z",
             )
+            rewriteInstanceCalls(
+                methodName = "getRunningAppProcesses",
+                parameters = emptyList(),
+                returnType = "Ljava/util/List;",
+                matchesReceiver = { it == "Landroid/app/ActivityManager;" },
+                targetMethod = "$EXTENSION_CLASS->getRunningAppProcesses(Landroid/app/ActivityManager;)Ljava/util/List;",
+            )
             methodCall(
                 smali = "Landroid/app/ActivityManager;->getMyMemoryState(Landroid/app/ActivityManager\$RunningAppProcessInfo;)V"
             ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
@@ -342,6 +349,34 @@ val pinSpoofPatch = bytecodePatch(
                 returnType = "V",
                 matchesReceiver = { isWebViewType(it) },
                 targetMethod = "$EXTENSION_CLASS->onWebViewPauseTimers(Landroid/webkit/WebView;)V",
+            )
+            rewriteInstanceCalls(
+                methodName = "getWindowVisibility",
+                parameters = emptyList(),
+                returnType = "I",
+                matchesReceiver = { isWebViewType(it) },
+                targetMethod = "$EXTENSION_CLASS->getWebViewWindowVisibility(Landroid/webkit/WebView;)I",
+            )
+            rewriteInstanceCalls(
+                methodName = "setWebViewClient",
+                parameters = listOf("Landroid/webkit/WebViewClient;"),
+                returnType = "V",
+                matchesReceiver = { isWebViewType(it) },
+                targetMethod = "$EXTENSION_CLASS->onWebViewSetClient(Landroid/webkit/WebView;Landroid/webkit/WebViewClient;)V",
+            )
+            rewriteInstanceCalls(
+                methodName = "loadUrl",
+                parameters = listOf("Ljava/lang/String;"),
+                returnType = "V",
+                matchesReceiver = { isWebViewType(it) },
+                targetMethod = "$EXTENSION_CLASS->onWebViewLoadUrl(Landroid/webkit/WebView;Ljava/lang/String;)V",
+            )
+            rewriteInstanceCalls(
+                methodName = "loadUrl",
+                parameters = listOf("Ljava/lang/String;", "Ljava/util/Map;"),
+                returnType = "V",
+                matchesReceiver = { isWebViewType(it) },
+                targetMethod = "$EXTENSION_CLASS->onWebViewLoadUrl(Landroid/webkit/WebView;Ljava/lang/String;Ljava/util/Map;)V",
             )
         }
 
@@ -738,6 +773,8 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
     val webViewClientTargets = mutableListOf<ClassDef>()
     val lifecycleCallbackTargets = mutableListOf<ClassDef>()
     val focusListenerTargets = mutableListOf<ClassDef>()
+    val windowFocusHolderTargets = mutableListOf<ClassDef>()
+    val broadcastReceiverTargets = mutableListOf<ClassDef>()
     val audioListenerTargets = mutableListOf<ClassDef>()
     val sensorListenerTargets = mutableListOf<ClassDef>()
     val displayListenerTargets = mutableListOf<ClassDef>()
@@ -775,20 +812,25 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
             val hasViewHook = classDef.methods.any { m ->
                 m.implementation != null && (
                     (hideFocus && m.name == "onWindowFocusChanged" && m.parameterTypes == listOf("Z") && m.returnType == "V") ||
-                        (hideWebView && m.name == "onWindowVisibilityChanged" && m.parameterTypes == listOf("I") && m.returnType == "V")
+                        (hideWebView && ((m.name == "onWindowVisibilityChanged" && m.parameterTypes == listOf("I") && m.returnType == "V") ||
+                            (m.name == "onVisibilityAggregated" && m.parameterTypes == listOf("Z") && m.returnType == "V")))
                     )
             }
             if (hasViewHook) viewTargets += classDef
         }
 
         if (hideWebView && isWebViewClientType(type)) {
-            val hasPageFinished = classDef.methods.any { m ->
-                m.implementation != null &&
-                    m.name == "onPageFinished" &&
-                    m.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;") &&
-                    m.returnType == "V"
+            val hasWebCb = classDef.methods.any { m ->
+                m.implementation != null && (
+                    (m.name == "onPageFinished" &&
+                        m.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;") &&
+                        m.returnType == "V") ||
+                        (m.name == "onPageStarted" &&
+                            m.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;", "Landroid/graphics/Bitmap;") &&
+                            m.returnType == "V")
+                    )
             }
-            if (hasPageFinished) webViewClientTargets += classDef
+            if (hasWebCb) webViewClientTargets += classDef
         }
 
         if (hideLifecycle && "Landroid/app/Application\$ActivityLifecycleCallbacks;" in classDef.interfaces) {
@@ -809,6 +851,28 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
                     m.returnType == "V"
             }
             if (hasListener) focusListenerTargets += classDef
+        }
+
+        if (hideFocus && !isActivityType(type) && !isViewType(type) &&
+            (hasAncestorIn(type, setOf("Landroid/app/Dialog;")) || "Landroid/view/Window\$Callback;" in classDef.interfaces)
+        ) {
+            val hasFocusCb = classDef.methods.any { m ->
+                m.implementation != null &&
+                    m.name == "onWindowFocusChanged" &&
+                    m.parameterTypes == listOf("Z") &&
+                    m.returnType == "V"
+            }
+            if (hasFocusCb) windowFocusHolderTargets += classDef
+        }
+
+        if (hideFocus && hasAncestorIn(type, setOf("Landroid/content/BroadcastReceiver;"))) {
+            val hasOnReceive = classDef.methods.any { m ->
+                m.implementation != null &&
+                    m.name == "onReceive" &&
+                    m.parameterTypes == listOf("Landroid/content/Context;", "Landroid/content/Intent;") &&
+                    m.returnType == "V"
+            }
+            if (hasOnReceive) broadcastReceiverTargets += classDef
         }
 
         if (retainAudio && "Landroid/media/AudioManager\$OnAudioFocusChangeListener;" in classDef.interfaces) {
@@ -912,6 +976,12 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
                 method.returnType == "V"
             ) {
                 forceWindowVisibilityVisible(method)
+            } else if (hideWebView &&
+                method.name == "onVisibilityAggregated" &&
+                method.parameterTypes == listOf("Z") &&
+                method.returnType == "V"
+            ) {
+                forceVisibilityAggregatedTrue(method)
             }
         }
     }
@@ -920,9 +990,12 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
         val mutable = mutableClassDefBy(classDef)
         for (method in mutable.methods.toList()) {
             if (method.implementation == null) continue
-            if (method.name == "onPageFinished" &&
-                method.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;") &&
-                method.returnType == "V"
+            if ((method.name == "onPageFinished" &&
+                    method.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;") &&
+                    method.returnType == "V") ||
+                (method.name == "onPageStarted" &&
+                    method.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;", "Landroid/graphics/Bitmap;") &&
+                    method.returnType == "V")
             ) {
                 method.addInstructions(
                     0,
@@ -954,6 +1027,32 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
                 method.returnType == "V"
             ) {
                 skipWhenBooleanParamFalse(method)
+            }
+        }
+    }
+
+    windowFocusHolderTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if (method.name == "onWindowFocusChanged" &&
+                method.parameterTypes == listOf("Z") &&
+                method.returnType == "V"
+            ) {
+                skipWhenBooleanParamFalse(method)
+            }
+        }
+    }
+
+    broadcastReceiverTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if (method.name == "onReceive" &&
+                method.parameterTypes == listOf("Landroid/content/Context;", "Landroid/content/Intent;") &&
+                method.returnType == "V"
+            ) {
+                suppressCloseSystemDialogsBroadcast(method)
             }
         }
     }
@@ -1057,6 +1156,57 @@ private fun forceWindowVisibilityVisible(method: MutableMethod) {
             move-result p1
         """.trimIndent(),
     )
+}
+
+private fun forceVisibilityAggregatedTrue(method: MutableMethod) {
+    method.addInstructions(
+        0,
+        """
+            invoke-static/range { p1 .. p1 }, $EXTENSION_CLASS->filterVisibilityAggregated(Z)Z
+            move-result p1
+        """.trimIndent(),
+    )
+}
+
+private fun BytecodePatchContext.suppressCloseSystemDialogsBroadcast(method: MutableMethod) {
+    val impl = method.implementation ?: return
+    val origP0 = method.p0Register
+    val paramRegs = if (origP0 < impl.registerCount) {
+        IntArray(impl.registerCount - origP0) { origP0 + it }
+    } else {
+        intArrayOf()
+    }
+    val free = runCatching { method.findFreeRegister(0, *paramRegs) }.getOrNull()
+    if (free != null && free < 256) {
+        method.addInstructions(
+            0,
+            """
+                invoke-static/range { p2 .. p2 }, $EXTENSION_CLASS->shouldSuppressBroadcast(Landroid/content/Intent;)Z
+                move-result v$free
+                if-eqz v$free, :pinspoof_orig
+                return-void
+                :pinspoof_orig
+                nop
+            """.trimIndent(),
+        )
+        return
+    }
+    if (impl.registerCount < 250) {
+        val cloned = method.cloneParameters()
+        val insertIdx = cloned.numberOfParameterRegistersLogical
+        val intentReg = "v${origP0 + 2}"
+        cloned.addInstructions(
+            insertIdx,
+            """
+                invoke-static/range { $intentReg .. $intentReg }, $EXTENSION_CLASS->shouldSuppressBroadcast(Landroid/content/Intent;)Z
+                move-result p0
+                if-eqz p0, :pinspoof_orig
+                return-void
+                :pinspoof_orig
+                nop
+            """.trimIndent(),
+        )
+    }
 }
 
 private fun BytecodePatchContext.suppressAudioFocusLoss(method: MutableMethod) {

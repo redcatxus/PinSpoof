@@ -1,14 +1,14 @@
 package us.redcatx.pinspoof
 
 /**
- * Compile-time default hook configuration generated for PinSpoof v1.3.0.
+ * Compile-time default hook configuration generated for PinSpoof v1.3.1.
  * When the Material You settings UI is enabled, runtime overrides from
  * XSharedPreferences take precedence per-app or globally.
  * Never requires scoping to system_server ("android").
  */
 object HookConfig {
     const val MODULE_TAG = "PinSpoof"
-    const val VERSION_NAME = "1.3.0"
+    const val VERSION_NAME = "1.3.1"
     const val MODULE_PKG = "us.redcatx.pinspoof"
     const val PREFS_NAME = "pinspoof_prefs"
     const val STATS_PREFS_NAME = "pinspoof_stats"
@@ -22,8 +22,8 @@ object HookConfig {
     const val HOOK_SETTINGS_LOCK_TO_APP = false
     const val HOOK_DPM_LOCK_TASK_PERMITTED = false
     const val HIDE_FOCUS_LOSS = true
-    const val HIDE_WEBVIEW_VISIBILITY = false
-    const val HIDE_LIFECYCLE_LOSS = false
+    const val HIDE_WEBVIEW_VISIBILITY = true
+    const val HIDE_LIFECYCLE_LOSS = true
     const val HIDE_MULTI_WINDOW_PIP = true
     const val SPOOF_PINNED_INSETS = false
     const val STRIP_FLAG_SECURE = false

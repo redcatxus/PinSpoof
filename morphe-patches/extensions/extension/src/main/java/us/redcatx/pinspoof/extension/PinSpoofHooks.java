@@ -21,6 +21,7 @@ import android.hardware.SensorManager;
 import android.hardware.TriggerEventListener;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
+import android.os.Process;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.Display;
@@ -31,16 +32,18 @@ import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityManager;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
- * Runtime hook targets merged into the patched APK by PinSpoof v1.3.0 Morphe Patch.
+ * Runtime hook targets merged into the patched APK by PinSpoof v1.3.1 Morphe Patch.
  * Patch-time options are configured via Morphe Manager / CLI Patching Options.
  */
 @SuppressWarnings({"unused", "deprecation"})
@@ -59,12 +62,17 @@ public final class PinSpoofHooks {
                     + "try{document.hasFocus=function(){return true;};}catch(e){}"
                     + "try{"
                     + "var s=function(e){"
-                    + "if(e.type==='blur'&&e.target!==window&&e.target!==document)return;"
+                    + "if((e.type==='blur'||e.type==='focusout')&&e.target!==window&&e.target!==document)return;"
                     + "e.stopImmediatePropagation();"
                     + "};"
                     + "window.addEventListener('blur',s,true);"
+                    + "window.addEventListener('focusout',s,true);"
+                    + "window.addEventListener('pagehide',s,true);"
+                    + "document.addEventListener('blur',s,true);"
+                    + "document.addEventListener('focusout',s,true);"
                     + "document.addEventListener('visibilitychange',s,true);"
                     + "document.addEventListener('webkitvisibilitychange',s,true);"
+                    + "document.addEventListener('freeze',s,true);"
                     + "}catch(e){}"
                     + "})();";
 
@@ -166,11 +174,68 @@ public final class PinSpoofHooks {
         }
     }
 
+    public static List<ActivityManager.RunningAppProcessInfo> getRunningAppProcesses(ActivityManager am) {
+        if (am == null) {
+            return Collections.emptyList();
+        }
+        List<ActivityManager.RunningAppProcessInfo> list = am.getRunningAppProcesses();
+        if (list != null) {
+            int myPid = Process.myPid();
+            for (ActivityManager.RunningAppProcessInfo info : list) {
+                if (info != null && info.pid == myPid) {
+                    info.importance = ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
+                    info.importanceReasonCode = ActivityManager.RunningAppProcessInfo.REASON_UNKNOWN;
+                }
+            }
+        }
+        return list;
+    }
+
+    public static boolean shouldSuppressBroadcast(Intent intent) {
+        boolean suppress = intent != null && Intent.ACTION_CLOSE_SYSTEM_DIALOGS.equals(intent.getAction());
+        if (suppress) {
+            log("Suppressed Intent.ACTION_CLOSE_SYSTEM_DIALOGS broadcast");
+        }
+        return suppress;
+    }
+
     public static int filterWindowVisibility(int visibility) {
         if (visibility != View.VISIBLE) {
             log("View/WebView window visibility coerced to View.VISIBLE");
         }
         return View.VISIBLE;
+    }
+
+    public static int getWebViewWindowVisibility(WebView webView) {
+        return View.VISIBLE;
+    }
+
+    public static boolean filterVisibilityAggregated(boolean isVisible) {
+        if (!isVisible) {
+            log("WebView onVisibilityAggregated(false) coerced to true");
+        }
+        return true;
+    }
+
+    public static void onWebViewSetClient(WebView webView, WebViewClient client) {
+        if (webView != null) {
+            webView.setWebViewClient(client);
+            injectWebViewStealth(webView);
+        }
+    }
+
+    public static void onWebViewLoadUrl(WebView webView, String url) {
+        if (webView != null) {
+            webView.loadUrl(url);
+            injectWebViewStealth(webView);
+        }
+    }
+
+    public static void onWebViewLoadUrl(WebView webView, String url, Map<String, String> headers) {
+        if (webView != null) {
+            webView.loadUrl(url, headers);
+            injectWebViewStealth(webView);
+        }
     }
 
     public static void injectWebViewStealth(final WebView webView) {

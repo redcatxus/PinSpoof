@@ -5,7 +5,7 @@ plugins {
 }
 
 base {
-    archivesName.set("PinSpoof-v1.3.0")
+    archivesName.set("PinSpoof-v1.3.1")
 }
 
 android {
@@ -16,8 +16,8 @@ android {
         applicationId = "us.redcatx.pinspoof"
         minSdk = 24
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.3.0"
+        versionCode = 5
+        versionName = "1.3.1"
     }
 
     buildTypes {

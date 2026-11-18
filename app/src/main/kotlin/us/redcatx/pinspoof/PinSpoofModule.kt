@@ -3,11 +3,14 @@ package us.redcatx.pinspoof
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.Application
+import android.app.Dialog
 import android.app.admin.DevicePolicyManager
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentResolver
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
@@ -25,6 +28,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.Display
@@ -50,10 +54,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * PinSpoof v1.3.0 — App-Scoped LockTask, Anti-Detection & UI Stealth Module (Android 7 – 16 / API 24 – 36)
+ * PinSpoof v1.3.1 — App-Scoped LockTask, Anti-Detection & UI Stealth Module (Android 7 – 16 / API 24 – 36)
  *
- * 1. Reactive mode + safe Window Focus spoofing are ON by default; aggressive pause/stop blocking,
- *    WebView visibility/JS stealth, Binder Stub$Proxy hooks, anti-detection cloaking, virtual display
+ * 1. Reactive mode + Window Focus, WebView visibility/JS stealth, and Activity/Fragment lifecycle
+ *    stealth are ON by default; Binder Stub$Proxy hooks, anti-detection cloaking, virtual display
  *    & clipboard bypass, sensor spoofing, signature spoof, and integrity soft-fail are opt-in.
  * 2. Dynamic method-name scanning for ActivityClient & Binder Stub$Proxy with strict error guards.
  * 3. Throttled live event reporting (counts + method-level event log) to the PinSpoof UI.
@@ -63,9 +67,11 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private val spoofedPinned = AtomicBoolean(HookConfig.ALWAYS_SPOOF_PINNED)
     private val hookedActivityClasses = ConcurrentHashMap.newKeySet<String>()
     private val hookedWebViewClients = ConcurrentHashMap.newKeySet<String>()
+    private val hookedReceivers = ConcurrentHashMap.newKeySet<String>()
     private val hookedAudioListeners = ConcurrentHashMap.newKeySet<String>()
     private val hookedSensorListeners = ConcurrentHashMap.newKeySet<String>()
     private val hookedDisplayListeners = ConcurrentHashMap.newKeySet<String>()
+    private val lastPrefsCheckMs = AtomicLong(0L)
 
     private val appContextRef = AtomicReferenceContext()
     private val pendingPinEvents = AtomicLong(0L)
@@ -105,11 +111,20 @@ class PinSpoofModule : IXposedHookLoadPackage {
         }.getOrNull()
     }
 
-    private fun readBool(pkg: String, key: String, fallback: Boolean): Boolean {
-        val xPrefs = prefs ?: return fallback
-        if (xPrefs.hasFileChanged()) {
-            xPrefs.reload()
+    private fun activePrefs(): XSharedPreferences? {
+        val xPrefs = prefs ?: return null
+        val now = SystemClock.elapsedRealtime()
+        val prev = lastPrefsCheckMs.get()
+        if (now - prev >= 500L && lastPrefsCheckMs.compareAndSet(prev, now)) {
+            if (xPrefs.hasFileChanged()) {
+                xPrefs.reload()
+            }
         }
+        return xPrefs
+    }
+
+    private fun readBool(pkg: String, key: String, fallback: Boolean): Boolean {
+        val xPrefs = activePrefs() ?: return fallback
         val hasAppOverride = xPrefs.getBoolean("${pkg}::override", false)
         return if (hasAppOverride) {
             xPrefs.getBoolean("${pkg}::$key", fallback)
@@ -119,10 +134,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
     }
 
     private fun readString(pkg: String, key: String, fallback: String): String {
-        val xPrefs = prefs ?: return fallback
-        if (xPrefs.hasFileChanged()) {
-            xPrefs.reload()
-        }
+        val xPrefs = activePrefs() ?: return fallback
         val hasAppOverride = xPrefs.getBoolean("${pkg}::override", false)
         return if (hasAppOverride) {
             xPrefs.getString("${pkg}::$key", fallback) ?: fallback
@@ -305,18 +317,10 @@ class PinSpoofModule : IXposedHookLoadPackage {
         if (readBool(pkg, "hook_binder_proxies", HookConfig.HOOK_BINDER_PROXIES)) {
             hookBinderProxies(lpparam)
         }
-        if (readBool(pkg, "hide_focus_loss", HookConfig.HIDE_FOCUS_LOSS)) {
-            hookFocusLossSpoof(lpparam)
-        }
-        if (readBool(pkg, "hide_webview_visibility", HookConfig.HIDE_WEBVIEW_VISIBILITY)) {
-            hookWebViewStealth(lpparam)
-        }
-        if (readBool(pkg, "hide_lifecycle_loss", HookConfig.HIDE_LIFECYCLE_LOSS)) {
-            hookLifecycleStealth(lpparam)
-        }
-        if (readBool(pkg, "hide_multi_window_pip", HookConfig.HIDE_MULTI_WINDOW_PIP)) {
-            hookMultiWindowAndPip(lpparam)
-        }
+        hookFocusLossSpoof(lpparam)
+        hookWebViewStealth(lpparam)
+        hookLifecycleStealth(lpparam)
+        hookMultiWindowAndPip(lpparam)
         if (readBool(pkg, "spoof_pinned_insets", HookConfig.SPOOF_PINNED_INSETS)) {
             hookPinnedWindowInsets(lpparam)
         }
@@ -569,6 +573,20 @@ class PinSpoofModule : IXposedHookLoadPackage {
             runCatching {
                 XposedBridge.hookAllMethods(
                     decorViewClass,
+                    "dispatchWindowFocusChanged",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldHideFocus(pkg) && param.args.isNotEmpty() && param.args[0] == false) {
+                                recordStat(pkg, "focus", "DecorView.dispatchWindowFocusChanged(false)")
+                                param.result = null
+                            }
+                        }
+                    }
+                )
+            }
+            runCatching {
+                XposedBridge.hookAllMethods(
+                    decorViewClass,
                     "onWindowFocusChanged",
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
@@ -591,7 +609,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg) && param.args[0] == false) {
                             recordStat(pkg, "focus", "Activity.onWindowFocusChanged(false)")
-                            param.args[0] = true
+                            param.result = null
                         }
                     }
                 }
@@ -604,6 +622,22 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         if (shouldHideFocus(pkg)) {
                             recordStat(pkg, "focus", "Activity.hasWindowFocus()")
                             param.result = true
+                        }
+                    }
+                }
+            )
+        }
+
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                Dialog::class.java,
+                "onWindowFocusChanged",
+                Boolean::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideFocus(pkg) && param.args[0] == false) {
+                            recordStat(pkg, "focus", "Dialog.onWindowFocusChanged(false)")
+                            param.result = null
                         }
                     }
                 }
@@ -638,6 +672,21 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     }
                 }
             )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                XposedHelpers.findAndHookMethod(
+                    Activity::class.java,
+                    "onTopResumedActivityChanged",
+                    Boolean::class.javaPrimitiveType,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldHideFocus(pkg) && param.args[0] == false) {
+                                recordStat(pkg, "focus", "Activity.onTopResumedActivityChanged(false)")
+                                param.result = null
+                            }
+                        }
+                    }
+                )
+            }
         }
 
         runCatching {
@@ -649,6 +698,18 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         if (shouldHideFocus(pkg)) {
                             recordStat(pkg, "focus", "Activity.onUserLeaveHint()")
                             log(pkg, "Suppressed Activity.performUserLeaving() safely")
+                            param.result = null
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                Activity::class.java,
+                "onUserLeaveHint",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideFocus(pkg) || shouldHideLifecycle(pkg)) {
+                            recordStat(pkg, "focus", "Activity.onUserLeaveHint()")
                             param.result = null
                         }
                     }
@@ -669,6 +730,83 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     }
                 }
             )
+            XposedHelpers.findAndHookMethod(
+                ActivityManager::class.java,
+                "getRunningAppProcesses",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldHideFocus(pkg)) return
+                        val list = param.result as? List<*> ?: return
+                        val myPid = Process.myPid()
+                        var updated = false
+                        for (item in list) {
+                            val info = item as? ActivityManager.RunningAppProcessInfo ?: continue
+                            if (info.pid == myPid || info.processName == pkg || info.pkgList?.contains(pkg) == true) {
+                                if (info.importance != ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
+                                    info.importance = ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+                                    info.importanceReasonCode = ActivityManager.RunningAppProcessInfo.REASON_UNKNOWN
+                                    updated = true
+                                }
+                            }
+                        }
+                        if (updated) {
+                            recordStat(pkg, "focus", "ActivityManager.getRunningAppProcesses()")
+                        }
+                    }
+                }
+            )
+        }
+
+        val hookReceiverArg: (Any?) -> Unit = { candidate ->
+            if (candidate is BroadcastReceiver) {
+                val cls = candidate.javaClass
+                if (hookedReceivers.add(cls.name)) {
+                    runCatching {
+                        XposedHelpers.findAndHookMethod(
+                            cls,
+                            "onReceive",
+                            Context::class.java,
+                            Intent::class.java,
+                            object : XC_MethodHook() {
+                                override fun beforeHookedMethod(p: MethodHookParam) {
+                                    if (!shouldHideFocus(pkg)) return
+                                    val intent = p.args.getOrNull(1) as? Intent ?: return
+                                    if (intent.action == Intent.ACTION_CLOSE_SYSTEM_DIALOGS) {
+                                        recordStat(pkg, "focus", "BroadcastReceiver(CLOSE_SYSTEM_DIALOGS)")
+                                        log(pkg, "Suppressed ACTION_CLOSE_SYSTEM_DIALOGS on ${cls.simpleName}")
+                                        p.result = null
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        runCatching {
+            XposedBridge.hookAllMethods(
+                ContextWrapper::class.java,
+                "registerReceiver",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        param.args.forEach(hookReceiverArg)
+                    }
+                }
+            )
+            XposedHelpers.findClassIfExists("android.app.ContextImpl", lpparam.classLoader)?.let { ctxImpl ->
+                listOf("registerReceiver", "registerReceiverInternal").forEach { mName ->
+                    XposedBridge.hookAllMethods(
+                        ctxImpl,
+                        mName,
+                        object : XC_MethodHook() {
+                            override fun beforeHookedMethod(param: MethodHookParam) {
+                                param.args.forEach(hookReceiverArg)
+                            }
+                        }
+                    )
+                }
+            }
         }
     }
 
@@ -688,6 +826,57 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         if (shouldHideWebView(pkg) && param.args.isNotEmpty() && param.args[0] != View.VISIBLE) {
                             recordStat(pkg, "webview", "WebView.onWindowVisibilityChanged()")
                             param.args[0] = View.VISIBLE
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                webViewClass,
+                "dispatchWindowVisibilityChanged",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideWebView(pkg) && param.args.isNotEmpty() && param.args[0] != View.VISIBLE) {
+                            param.args[0] = View.VISIBLE
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                webViewClass,
+                "getWindowVisibility",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideWebView(pkg)) {
+                            param.result = View.VISIBLE
+                        }
+                    }
+                }
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                XposedBridge.hookAllMethods(
+                    webViewClass,
+                    "onVisibilityAggregated",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldHideWebView(pkg) && param.args.isNotEmpty() && param.args[0] == false) {
+                                recordStat(pkg, "webview", "WebView.onVisibilityAggregated(false)")
+                                param.args[0] = true
+                            }
+                        }
+                    }
+                )
+            }
+            XposedBridge.hookAllMethods(
+                webViewClass,
+                "onWindowFocusChanged",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if ((shouldHideFocus(pkg) || shouldHideWebView(pkg)) &&
+                            param.args.isNotEmpty() &&
+                            param.args[0] == false
+                        ) {
+                            recordStat(pkg, "webview", "WebView.onWindowFocusChanged(false)")
+                            param.result = null
                         }
                     }
                 }
@@ -723,20 +912,26 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        runCatching {
-            XposedBridge.hookAllMethods(
-                WebViewClient::class.java,
-                "onPageFinished",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val view = param.args.firstOrNull() as? WebView ?: return
-                        if (shouldHideWebView(pkg)) {
-                            injectWebViewStealthJs(view, pkg)
+        val hookWebViewClientCallbacks = { targetClass: Class<*> ->
+            listOf("onPageStarted", "onPageFinished").forEach { cbName ->
+                runCatching {
+                    XposedBridge.hookAllMethods(
+                        targetClass,
+                        cbName,
+                        object : XC_MethodHook() {
+                            override fun afterHookedMethod(p: MethodHookParam) {
+                                val view = p.args.firstOrNull() as? WebView ?: return
+                                if (shouldHideWebView(pkg)) {
+                                    injectWebViewStealthJs(view, pkg)
+                                }
+                            }
                         }
-                    }
+                    )
                 }
-            )
+            }
         }
+
+        hookWebViewClientCallbacks(WebViewClient::class.java)
 
         runCatching {
             XposedBridge.hookAllMethods(
@@ -747,20 +942,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         val client = param.args.firstOrNull() as? WebViewClient ?: return
                         val clsName = client.javaClass.name
                         if (hookedWebViewClients.add(clsName)) {
-                            runCatching {
-                                XposedBridge.hookAllMethods(
-                                    client.javaClass,
-                                    "onPageFinished",
-                                    object : XC_MethodHook() {
-                                        override fun afterHookedMethod(p: MethodHookParam) {
-                                            val view = p.args.firstOrNull() as? WebView ?: return
-                                            if (shouldHideWebView(pkg)) {
-                                                injectWebViewStealthJs(view, pkg)
-                                            }
-                                        }
-                                    }
-                                )
-                            }
+                            hookWebViewClientCallbacks(client.javaClass)
                         }
                     }
                 }
@@ -824,6 +1006,33 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     }
                 }
             )
+        }
+
+        listOf("androidx.fragment.app.Fragment", "android.app.Fragment").forEach { fragClassName ->
+            val fragClass = XposedHelpers.findClassIfExists(fragClassName, lpparam.classLoader)
+            if (fragClass != null) {
+                listOf("onPause", "onStop").forEach { mName ->
+                    runCatching {
+                        XposedHelpers.findAndHookMethod(
+                            fragClass,
+                            mName,
+                            object : XC_MethodHook() {
+                                override fun beforeHookedMethod(param: MethodHookParam) {
+                                    if (!shouldHideLifecycle(pkg)) return
+                                    val act = runCatching {
+                                        XposedHelpers.callMethod(param.thisObject, "getActivity") as? Activity
+                                    }.getOrNull()
+                                    if (act?.isFinishing != true) {
+                                        runCatching { XposedHelpers.setBooleanField(param.thisObject, "mCalled", true) }
+                                        recordStat(pkg, "lifecycle", "Fragment.$mName()")
+                                        param.result = null
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            }
         }
 
         val lifecycleRegistryClass = XposedHelpers.findClassIfExists(
@@ -911,6 +1120,21 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             if (shouldHideFocus(pkg) && param.args[0] == false) {
                                 recordStat(pkg, "focus", "$simpleName.onWindowFocusChanged(false)")
                                 log(pkg, "Suppressed $name.onWindowFocusChanged(false)")
+                                param.result = null
+                            }
+                        }
+                    })
+                }
+                runCatching {
+                    val onTopResumed = cls.getDeclaredMethod(
+                        "onTopResumedActivityChanged",
+                        Boolean::class.javaPrimitiveType
+                    )
+                    XposedBridge.hookMethod(onTopResumed, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if ((shouldHideFocus(pkg) || shouldHideLifecycle(pkg)) && param.args[0] == false) {
+                                recordStat(pkg, "focus", "$simpleName.onTopResumedActivityChanged(false)")
+                                log(pkg, "Suppressed $name.onTopResumedActivityChanged(false)")
                                 param.result = null
                             }
                         }
@@ -1661,12 +1885,17 @@ class PinSpoofModule : IXposedHookLoadPackage {
               } catch (e) {}
               try {
                 var stopFocusEvent = function(e) {
-                  if (e.type === 'blur' && e.target !== window && e.target !== document) return;
+                  if ((e.type === 'blur' || e.type === 'focusout') && e.target !== window && e.target !== document) return;
                   e.stopImmediatePropagation();
                 };
                 window.addEventListener('blur', stopFocusEvent, true);
+                window.addEventListener('focusout', stopFocusEvent, true);
+                window.addEventListener('pagehide', stopFocusEvent, true);
+                document.addEventListener('blur', stopFocusEvent, true);
+                document.addEventListener('focusout', stopFocusEvent, true);
                 document.addEventListener('visibilitychange', stopFocusEvent, true);
                 document.addEventListener('webkitvisibilitychange', stopFocusEvent, true);
+                document.addEventListener('freeze', stopFocusEvent, true);
               } catch (e) {}
             })();
         """
