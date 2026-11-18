@@ -23,6 +23,14 @@ export interface ModuleConfig {
   stripFlagSecure: boolean;
   hideAccessibilityAndOverlays: boolean;
   retainAudioFocus: boolean;
+  cloakPackagesAndInstaller: boolean;
+  sanitizeStackTraces: boolean;
+  spoofMotionSensors: boolean;
+  bypassVirtualDisplays: boolean;
+  unblockClipboard: boolean;
+  spoofPackageSignature: boolean;
+  spoofSignatureHex: string;
+  softFailIntegrityChecks: boolean;
   includeMaterialYouUi: boolean;
   debugLogging: boolean;
   recommendedScopes: string;
@@ -39,8 +47,8 @@ export interface GeneratedFile {
 export const DEFAULT_MODULE_CONFIG: ModuleConfig = {
   packageName: 'us.redcatx.pinspoof',
   moduleName: 'PinSpoof',
-  versionName: '1.2.0',
-  versionCode: 3,
+  versionName: '1.3.0',
+  versionCode: 4,
   minSdk: 24,
   targetSdk: 36,
   spoofTiming: 'reactive',
@@ -58,6 +66,14 @@ export const DEFAULT_MODULE_CONFIG: ModuleConfig = {
   stripFlagSecure: false,
   hideAccessibilityAndOverlays: false,
   retainAudioFocus: false,
+  cloakPackagesAndInstaller: false,
+  sanitizeStackTraces: false,
+  spoofMotionSensors: false,
+  bypassVirtualDisplays: false,
+  unblockClipboard: false,
+  spoofPackageSignature: false,
+  spoofSignatureHex: '',
+  softFailIntegrityChecks: false,
   includeMaterialYouUi: true,
   debugLogging: false,
   recommendedScopes: '',
@@ -83,6 +99,13 @@ export function applyPresetToConfig(
       stripFlagSecure: false,
       hideAccessibilityAndOverlays: false,
       retainAudioFocus: false,
+      cloakPackagesAndInstaller: false,
+      sanitizeStackTraces: false,
+      spoofMotionSensors: false,
+      bypassVirtualDisplays: false,
+      unblockClipboard: false,
+      spoofPackageSignature: false,
+      softFailIntegrityChecks: false,
       hookSettingsLockToApp: false,
       hookDevicePolicyPermitted: false,
     };
@@ -103,6 +126,13 @@ export function applyPresetToConfig(
       stripFlagSecure: false,
       hideAccessibilityAndOverlays: false,
       retainAudioFocus: false,
+      cloakPackagesAndInstaller: false,
+      sanitizeStackTraces: false,
+      spoofMotionSensors: false,
+      bypassVirtualDisplays: false,
+      unblockClipboard: false,
+      spoofPackageSignature: false,
+      softFailIntegrityChecks: false,
       hookSettingsLockToApp: false,
       hookDevicePolicyPermitted: false,
     };
@@ -122,6 +152,13 @@ export function applyPresetToConfig(
     stripFlagSecure: true,
     hideAccessibilityAndOverlays: true,
     retainAudioFocus: true,
+    cloakPackagesAndInstaller: true,
+    sanitizeStackTraces: true,
+    spoofMotionSensors: true,
+    bypassVirtualDisplays: true,
+    unblockClipboard: true,
+    spoofPackageSignature: true,
+    softFailIntegrityChecks: true,
     hookSettingsLockToApp: true,
     hookDevicePolicyPermitted: true,
   };

@@ -50,14 +50,14 @@ jobs:
         working-directory: ${{ steps.gradle_root.outputs.dir }}
         run: gradle assembleDebug assembleRelease
 
-      - name: Stage PinSpoof-v1.2.0.apk Release & Debug Outputs
+      - name: Stage PinSpoof-v1.3.0.apk Release & Debug Outputs
         working-directory: ${{ steps.gradle_root.outputs.dir }}
         run: |
           mkdir -p dist-apks
           RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          cp "$RELEASE_APK" "dist-apks/PinSpoof-v1.2.0.apk"
-          cp "$DEBUG_APK" "dist-apks/PinSpoof-v1.2.0-debug.apk"
+          cp "$RELEASE_APK" "dist-apks/PinSpoof-v1.3.0.apk"
+          cp "$DEBUG_APK" "dist-apks/PinSpoof-v1.3.0-debug.apk"
 
       - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
@@ -115,12 +115,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gradle :patches:buildAndroid :patches:generatePatchesList --no-daemon
 
-      - name: Stage PinSpoof-v1.2.0.mpp Bundle & Patches List
+      - name: Stage PinSpoof-v1.3.0.mpp Bundle & Patches List
         working-directory: ${{ steps.morphe_root.outputs.dir }}
         run: |
           mkdir -p dist-patches
           MPP_FILE=$(find patches/build/libs -maxdepth 1 -name "*.mpp" | head -n 1)
-          cp "$MPP_FILE" "dist-patches/PinSpoof-v1.2.0.mpp"
+          cp "$MPP_FILE" "dist-patches/PinSpoof-v1.3.0.mpp"
           cp "patches-list.json" "dist-patches/patches-list.json"
 
       - name: Upload Morphe Patch Artifacts

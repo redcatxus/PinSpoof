@@ -3,13 +3,14 @@ package us.redcatx.pinspoof.prefs
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
+import org.json.JSONArray
 import org.json.JSONObject
 import us.redcatx.pinspoof.HookConfig
 
 enum class HookPreset(val label: String, val summary: String) {
     LIGHT("Light", "Pinning bypass & state spoof only"),
     BALANCED("Balanced", "Safe defaults: pinning + focus + multi-window"),
-    AGGRESSIVE("Aggressive", "All stealth, WebView JS, lifecycle & UI hooks")
+    AGGRESSIVE("Aggressive", "All stealth, anti-detection, display & UI hooks")
 }
 
 data class GranularHookState(
@@ -23,6 +24,14 @@ data class GranularHookState(
     val stripFlagSecure: Boolean = HookConfig.STRIP_FLAG_SECURE,
     val hideAccessibilityOverlays: Boolean = HookConfig.HIDE_ACCESSIBILITY_OVERLAYS,
     val retainAudioFocus: Boolean = HookConfig.RETAIN_AUDIO_FOCUS,
+    val cloakPackagesInstaller: Boolean = HookConfig.CLOAK_PACKAGES_INSTALLER,
+    val sanitizeStackTraces: Boolean = HookConfig.SANITIZE_STACK_TRACES,
+    val spoofMotionSensors: Boolean = HookConfig.SPOOF_MOTION_SENSORS,
+    val bypassVirtualDisplays: Boolean = HookConfig.BYPASS_VIRTUAL_DISPLAYS,
+    val unblockClipboard: Boolean = HookConfig.UNBLOCK_CLIPBOARD,
+    val spoofPackageSignature: Boolean = HookConfig.SPOOF_PACKAGE_SIGNATURE,
+    val spoofSignatureHex: String = HookConfig.SPOOF_SIGNATURE_HEX,
+    val softFailIntegrity: Boolean = HookConfig.SOFT_FAIL_INTEGRITY,
     val hookActivityLockTask: Boolean = HookConfig.HOOK_ACTIVITY_LOCK_TASK,
     val hookActivityManagerState: Boolean = HookConfig.HOOK_ACTIVITY_MANAGER_STATE,
     val hookBinderProxies: Boolean = HookConfig.HOOK_BINDER_PROXIES,
@@ -43,6 +52,13 @@ data class GranularHookState(
             stripFlagSecure = false,
             hideAccessibilityOverlays = false,
             retainAudioFocus = false,
+            cloakPackagesInstaller = false,
+            sanitizeStackTraces = false,
+            spoofMotionSensors = false,
+            bypassVirtualDisplays = false,
+            unblockClipboard = false,
+            spoofPackageSignature = false,
+            softFailIntegrity = false,
             hookActivityLockTask = true,
             hookActivityManagerState = true,
             hookBinderProxies = false,
@@ -61,6 +77,13 @@ data class GranularHookState(
             stripFlagSecure = false,
             hideAccessibilityOverlays = false,
             retainAudioFocus = false,
+            cloakPackagesInstaller = false,
+            sanitizeStackTraces = false,
+            spoofMotionSensors = false,
+            bypassVirtualDisplays = false,
+            unblockClipboard = false,
+            spoofPackageSignature = false,
+            softFailIntegrity = false,
             hookActivityLockTask = true,
             hookActivityManagerState = true,
             hookBinderProxies = false,
@@ -79,6 +102,13 @@ data class GranularHookState(
             stripFlagSecure = true,
             hideAccessibilityOverlays = true,
             retainAudioFocus = true,
+            cloakPackagesInstaller = true,
+            sanitizeStackTraces = true,
+            spoofMotionSensors = true,
+            bypassVirtualDisplays = true,
+            unblockClipboard = true,
+            spoofPackageSignature = true,
+            softFailIntegrity = true,
             hookActivityLockTask = true,
             hookActivityManagerState = true,
             hookBinderProxies = true,
@@ -88,8 +118,11 @@ data class GranularHookState(
         )
     }
 
+    fun matchingPreset(): HookPreset? =
+        HookPreset.entries.firstOrNull { this == this.withPreset(it) }
+
     fun toJson(targetPackage: String?): String = JSONObject().apply {
-        put("schemaVersion", 2)
+        put("schemaVersion", 3)
         put("targetPackage", targetPackage ?: "global")
         put("masterEnabled", masterEnabled)
         put("alwaysSpoofPinned", alwaysSpoofPinned)
@@ -101,6 +134,14 @@ data class GranularHookState(
         put("stripFlagSecure", stripFlagSecure)
         put("hideAccessibilityOverlays", hideAccessibilityOverlays)
         put("retainAudioFocus", retainAudioFocus)
+        put("cloakPackagesInstaller", cloakPackagesInstaller)
+        put("sanitizeStackTraces", sanitizeStackTraces)
+        put("spoofMotionSensors", spoofMotionSensors)
+        put("bypassVirtualDisplays", bypassVirtualDisplays)
+        put("unblockClipboard", unblockClipboard)
+        put("spoofPackageSignature", spoofPackageSignature)
+        put("spoofSignatureHex", spoofSignatureHex)
+        put("softFailIntegrity", softFailIntegrity)
         put("hookActivityLockTask", hookActivityLockTask)
         put("hookActivityManagerState", hookActivityManagerState)
         put("hookBinderProxies", hookBinderProxies)
@@ -124,6 +165,14 @@ data class GranularHookState(
                 stripFlagSecure = obj.optBoolean("stripFlagSecure", base.stripFlagSecure),
                 hideAccessibilityOverlays = obj.optBoolean("hideAccessibilityOverlays", base.hideAccessibilityOverlays),
                 retainAudioFocus = obj.optBoolean("retainAudioFocus", base.retainAudioFocus),
+                cloakPackagesInstaller = obj.optBoolean("cloakPackagesInstaller", base.cloakPackagesInstaller),
+                sanitizeStackTraces = obj.optBoolean("sanitizeStackTraces", base.sanitizeStackTraces),
+                spoofMotionSensors = obj.optBoolean("spoofMotionSensors", base.spoofMotionSensors),
+                bypassVirtualDisplays = obj.optBoolean("bypassVirtualDisplays", base.bypassVirtualDisplays),
+                unblockClipboard = obj.optBoolean("unblockClipboard", base.unblockClipboard),
+                spoofPackageSignature = obj.optBoolean("spoofPackageSignature", base.spoofPackageSignature),
+                spoofSignatureHex = obj.optString("spoofSignatureHex", base.spoofSignatureHex),
+                softFailIntegrity = obj.optBoolean("softFailIntegrity", base.softFailIntegrity),
                 hookActivityLockTask = obj.optBoolean("hookActivityLockTask", base.hookActivityLockTask),
                 hookActivityManagerState = obj.optBoolean("hookActivityManagerState", base.hookActivityManagerState),
                 hookBinderProxies = obj.optBoolean("hookBinderProxies", base.hookBinderProxies),
@@ -141,10 +190,19 @@ data class HookStats(
     val focusHidden: Long = 0L,
     val lifecycleHidden: Long = 0L,
     val webviewSpoofed: Long = 0L,
+    val cloakBypassed: Long = 0L,
     val lastUpdatedMs: Long = 0L
 ) {
-    val total: Long get() = pinBlocked + focusHidden + lifecycleHidden + webviewSpoofed
+    val total: Long get() = pinBlocked + focusHidden + lifecycleHidden + webviewSpoofed + cloakBypassed
 }
+
+data class HookLogEntry(
+    val pkg: String,
+    val category: String,
+    val method: String,
+    val count: Long,
+    val timestampMs: Long
+)
 
 class PrefsManager(context: Context) {
 
@@ -225,6 +283,38 @@ class PrefsManager(context: Context) {
                 "${prefix}retain_audio_focus",
                 g?.retainAudioFocus ?: HookConfig.RETAIN_AUDIO_FOCUS
             ),
+            cloakPackagesInstaller = prefs.getBoolean(
+                "${prefix}cloak_packages_installer",
+                g?.cloakPackagesInstaller ?: HookConfig.CLOAK_PACKAGES_INSTALLER
+            ),
+            sanitizeStackTraces = prefs.getBoolean(
+                "${prefix}sanitize_stack_traces",
+                g?.sanitizeStackTraces ?: HookConfig.SANITIZE_STACK_TRACES
+            ),
+            spoofMotionSensors = prefs.getBoolean(
+                "${prefix}spoof_motion_sensors",
+                g?.spoofMotionSensors ?: HookConfig.SPOOF_MOTION_SENSORS
+            ),
+            bypassVirtualDisplays = prefs.getBoolean(
+                "${prefix}bypass_virtual_displays",
+                g?.bypassVirtualDisplays ?: HookConfig.BYPASS_VIRTUAL_DISPLAYS
+            ),
+            unblockClipboard = prefs.getBoolean(
+                "${prefix}unblock_clipboard",
+                g?.unblockClipboard ?: HookConfig.UNBLOCK_CLIPBOARD
+            ),
+            spoofPackageSignature = prefs.getBoolean(
+                "${prefix}spoof_package_signature",
+                g?.spoofPackageSignature ?: HookConfig.SPOOF_PACKAGE_SIGNATURE
+            ),
+            spoofSignatureHex = prefs.getString(
+                "${prefix}spoof_signature_hex",
+                g?.spoofSignatureHex ?: HookConfig.SPOOF_SIGNATURE_HEX
+            ) ?: HookConfig.SPOOF_SIGNATURE_HEX,
+            softFailIntegrity = prefs.getBoolean(
+                "${prefix}soft_fail_integrity",
+                g?.softFailIntegrity ?: HookConfig.SOFT_FAIL_INTEGRITY
+            ),
             hookActivityLockTask = prefs.getBoolean(
                 "${prefix}hook_activity_lock_task",
                 g?.hookActivityLockTask ?: HookConfig.HOOK_ACTIVITY_LOCK_TASK
@@ -272,6 +362,14 @@ class PrefsManager(context: Context) {
             putBoolean("${prefix}strip_flag_secure", state.stripFlagSecure)
             putBoolean("${prefix}hide_accessibility_overlays", state.hideAccessibilityOverlays)
             putBoolean("${prefix}retain_audio_focus", state.retainAudioFocus)
+            putBoolean("${prefix}cloak_packages_installer", state.cloakPackagesInstaller)
+            putBoolean("${prefix}sanitize_stack_traces", state.sanitizeStackTraces)
+            putBoolean("${prefix}spoof_motion_sensors", state.spoofMotionSensors)
+            putBoolean("${prefix}bypass_virtual_displays", state.bypassVirtualDisplays)
+            putBoolean("${prefix}unblock_clipboard", state.unblockClipboard)
+            putBoolean("${prefix}spoof_package_signature", state.spoofPackageSignature)
+            putString("${prefix}spoof_signature_hex", state.spoofSignatureHex.trim())
+            putBoolean("${prefix}soft_fail_integrity", state.softFailIntegrity)
             putBoolean("${prefix}hook_activity_lock_task", state.hookActivityLockTask)
             putBoolean("${prefix}hook_activity_manager_state", state.hookActivityManagerState)
             putBoolean("${prefix}hook_binder_proxies", state.hookBinderProxies)
@@ -289,8 +387,30 @@ class PrefsManager(context: Context) {
             focusHidden = statsPrefs.getLong("$key::focus", 0L),
             lifecycleHidden = statsPrefs.getLong("$key::lifecycle", 0L),
             webviewSpoofed = statsPrefs.getLong("$key::webview", 0L),
+            cloakBypassed = statsPrefs.getLong("$key::cloak", 0L),
             lastUpdatedMs = statsPrefs.getLong("$key::ts", 0L)
         )
+    }
+
+    fun loadEventLog(targetPackage: String?): List<HookLogEntry> {
+        val raw = statsPrefs.getString("events_log", "[]") ?: "[]"
+        val arr = runCatching { JSONArray(raw) }.getOrElse { return emptyList() }
+        val result = mutableListOf<HookLogEntry>()
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val pkg = obj.optString("pkg")
+            if (targetPackage != null && pkg != targetPackage) continue
+            result.add(
+                HookLogEntry(
+                    pkg = pkg,
+                    category = obj.optString("category"),
+                    method = obj.optString("method"),
+                    count = obj.optLong("count", 0L),
+                    timestampMs = obj.optLong("ts", 0L)
+                )
+            )
+        }
+        return result
     }
 
     fun resetStats(targetPackage: String?) {
@@ -302,7 +422,19 @@ class PrefsManager(context: Context) {
                 remove("$targetPackage::focus")
                 remove("$targetPackage::lifecycle")
                 remove("$targetPackage::webview")
+                remove("$targetPackage::cloak")
                 remove("$targetPackage::ts")
+                val filtered = JSONArray()
+                val arr = runCatching {
+                    JSONArray(statsPrefs.getString("events_log", "[]") ?: "[]")
+                }.getOrElse { JSONArray() }
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    if (obj.optString("pkg") != targetPackage) {
+                        filtered.put(obj)
+                    }
+                }
+                putString("events_log", filtered.toString())
             }
         }.apply()
     }

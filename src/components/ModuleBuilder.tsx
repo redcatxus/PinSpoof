@@ -59,8 +59,15 @@ export function ModuleBuilder({
       | 'hideMultiWindowAndPip'
       | 'spoofPinnedInsets'
       | 'stripFlagSecure'
+      | 'bypassVirtualDisplays'
+      | 'unblockClipboard'
       | 'hideAccessibilityAndOverlays'
       | 'retainAudioFocus'
+      | 'cloakPackagesAndInstaller'
+      | 'sanitizeStackTraces'
+      | 'spoofMotionSensors'
+      | 'spoofPackageSignature'
+      | 'softFailIntegrityChecks'
       | 'hookActivityLockTask'
       | 'hookActivityManagerState'
       | 'hookActivityClient'
@@ -75,7 +82,7 @@ export function ModuleBuilder({
     {
       key: 'includeMaterialYouUi',
       label: 'In-App Material 3 Expressive + Material You UI',
-      detail: 'Compose UI with Light/Balanced/Aggressive presets, JSON import/export & live counters.',
+      detail: 'Compose UI with inline per-app rule dropdowns, presets, JSON import/export & method log.',
     },
     {
       key: 'hideFocusLoss',
@@ -108,6 +115,16 @@ export function ModuleBuilder({
       detail: 'Clear FLAG_SECURE on Windows and SurfaceViews for screenshots and troubleshooting.',
     },
     {
+      key: 'bypassVirtualDisplays',
+      label: 'Virtual Display & Screen Sharing Bypass',
+      detail: 'Expose only Display.DEFAULT_DISPLAY in DisplayManager and ignore secondary display events.',
+    },
+    {
+      key: 'unblockClipboard',
+      label: 'Unblock Clipboard Clear',
+      detail: 'Prevent ClipboardManager.clearPrimaryClip() and empty clip wipes during copy/paste.',
+    },
+    {
       key: 'hideAccessibilityAndOverlays',
       label: 'Hide Accessibility & Overlay Checks',
       detail: 'Return empty AccessibilityManager service list and Settings.canDrawOverlays() = false.',
@@ -116,6 +133,31 @@ export function ModuleBuilder({
       key: 'retainAudioFocus',
       label: 'Retain Audio Focus',
       detail: 'Suppress negative AudioManager.OnAudioFocusChangeListener notifications.',
+    },
+    {
+      key: 'cloakPackagesAndInstaller',
+      label: 'Cloak Packages & Play Store Installer',
+      detail: 'Report com.android.vending as installer and hide Xposed/LSPosed/Morphe packages.',
+    },
+    {
+      key: 'sanitizeStackTraces',
+      label: 'Sanitize Stack Traces',
+      detail: 'Strip Xposed, LSPHooker, EdHooker & PinSpoof frames from Thread/Throwable.getStackTrace().',
+    },
+    {
+      key: 'spoofMotionSensors',
+      label: 'Spoof Motion Sensors (Stationary)',
+      detail: 'Clamp accelerometer, gyroscope & significant-motion sensors to resting desk readings.',
+    },
+    {
+      key: 'spoofPackageSignature',
+      label: 'Static Package Signature Spoof',
+      detail: 'Replace PackageInfo.signatures with your Original Certificate DER Hex if provided.',
+    },
+    {
+      key: 'softFailIntegrityChecks',
+      label: 'Play Integrity / SafetyNet Soft-Fail',
+      detail: 'Clear local Integrity & SafetyNet attestation exceptions on Task.getException().',
     },
     {
       key: 'hookActivityLockTask',
@@ -294,6 +336,24 @@ export function ModuleBuilder({
                   </label>
                 ))}
               </div>
+              {config.spoofPackageSignature && (
+                <div className="mt-3 pt-3 border-t border-slate-800/80">
+                  <label
+                    htmlFor="spoof-sig-hex"
+                    className="block text-xs font-medium text-slate-300 mb-1"
+                  >
+                    Original Certificate DER Hex (Optional)
+                  </label>
+                  <input
+                    id="spoof-sig-hex"
+                    type="text"
+                    placeholder="3082..."
+                    value={config.spoofSignatureHex}
+                    onChange={(e) => updateField('spoofSignatureHex', e.target.value)}
+                    className="w-full rounded-md border border-slate-700 bg-slate-900/90 px-3 py-2 font-mono text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+              )}
             </div>
 
             <div className="pt-4 border-t border-slate-800">

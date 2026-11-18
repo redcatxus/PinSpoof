@@ -4,16 +4,30 @@ import android.app.Activity
 import android.app.ActivityManager
 import android.app.Application
 import android.app.admin.DevicePolicyManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
+import android.content.pm.Signature
 import android.graphics.Insets
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.hardware.TriggerEventListener
+import android.hardware.display.DisplayManager
 import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Display
 import android.view.SurfaceView
 import android.view.View
 import android.view.ViewTreeObserver
@@ -36,16 +50,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * PinSpoof v1.2.0 — App-Scoped LockTask & Focus/UI Stealth Module (Android 7 – 16 / API 24 – 36)
+ * PinSpoof v1.3.0 — App-Scoped LockTask, Anti-Detection & UI Stealth Module (Android 7 – 16 / API 24 – 36)
  *
- * Safer v1.2.0 architecture:
- * 1. Reactive mode + safe Window Focus spoofing are ON by default; aggressive lifecycle pause/stop
- *    blocking, WebView visibility/pause suppression, and Binder Stub$Proxy hooks are OFF by default
- *    to prevent SurfaceView black screens, RenderProcessGone crashes, and OEM signature mismatches.
+ * 1. Reactive mode + safe Window Focus spoofing are ON by default; aggressive pause/stop blocking,
+ *    WebView visibility/JS stealth, Binder Stub$Proxy hooks, anti-detection cloaking, virtual display
+ *    & clipboard bypass, sensor spoofing, signature spoof, and integrity soft-fail are opt-in.
  * 2. Dynamic method-name scanning for ActivityClient & Binder Stub$Proxy with strict error guards.
- * 3. Optional Page Visibility / Fullscreen JS injection for WebView, zeroed pinned WindowInsets
- *    simulation, FLAG_SECURE stripping, accessibility/overlay bypass, audio focus retention, and
- *    throttled live event reporting to the PinSpoof UI.
+ * 3. Throttled live event reporting (counts + method-level event log) to the PinSpoof UI.
  */
 class PinSpoofModule : IXposedHookLoadPackage {
 
@@ -53,14 +64,22 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private val hookedActivityClasses = ConcurrentHashMap.newKeySet<String>()
     private val hookedWebViewClients = ConcurrentHashMap.newKeySet<String>()
     private val hookedAudioListeners = ConcurrentHashMap.newKeySet<String>()
+    private val hookedSensorListeners = ConcurrentHashMap.newKeySet<String>()
+    private val hookedDisplayListeners = ConcurrentHashMap.newKeySet<String>()
 
     private val appContextRef = AtomicReferenceContext()
     private val pendingPinEvents = AtomicLong(0L)
     private val pendingFocusEvents = AtomicLong(0L)
     private val pendingLifecycleEvents = AtomicLong(0L)
     private val pendingWebViewEvents = AtomicLong(0L)
+    private val pendingCloakEvents = AtomicLong(0L)
+    private val pendingMethodEvents = ConcurrentHashMap<String, AtomicLong>()
     private val lastFlushMs = AtomicLong(0L)
     private val flushScheduled = AtomicBoolean(false)
+
+    private val inStackSanitize = object : ThreadLocal<Boolean>() {
+        override fun initialValue(): Boolean = false
+    }
 
     private class AtomicReferenceContext {
         @Volatile
@@ -99,6 +118,19 @@ class PinSpoofModule : IXposedHookLoadPackage {
         }
     }
 
+    private fun readString(pkg: String, key: String, fallback: String): String {
+        val xPrefs = prefs ?: return fallback
+        if (xPrefs.hasFileChanged()) {
+            xPrefs.reload()
+        }
+        val hasAppOverride = xPrefs.getBoolean("${pkg}::override", false)
+        return if (hasAppOverride) {
+            xPrefs.getString("${pkg}::$key", fallback) ?: fallback
+        } else {
+            xPrefs.getString("global::$key", fallback) ?: fallback
+        }
+    }
+
     private fun isModuleEnabled(pkg: String): Boolean =
         readBool(pkg, "master_enabled", true)
 
@@ -131,13 +163,42 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private fun shouldRetainAudioFocus(pkg: String): Boolean =
         isModuleEnabled(pkg) && readBool(pkg, "retain_audio_focus", HookConfig.RETAIN_AUDIO_FOCUS)
 
-    private fun recordStat(pkg: String, category: String) {
+    private fun shouldCloakPackages(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "cloak_packages_installer", HookConfig.CLOAK_PACKAGES_INSTALLER)
+
+    private fun shouldSanitizeStackTraces(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "sanitize_stack_traces", HookConfig.SANITIZE_STACK_TRACES)
+
+    private fun shouldSpoofSensors(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "spoof_motion_sensors", HookConfig.SPOOF_MOTION_SENSORS)
+
+    private fun shouldBypassVirtualDisplays(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "bypass_virtual_displays", HookConfig.BYPASS_VIRTUAL_DISPLAYS)
+
+    private fun shouldUnblockClipboard(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "unblock_clipboard", HookConfig.UNBLOCK_CLIPBOARD)
+
+    private fun shouldSpoofSignature(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "spoof_package_signature", HookConfig.SPOOF_PACKAGE_SIGNATURE)
+
+    private fun shouldSoftFailIntegrity(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "soft_fail_integrity", HookConfig.SOFT_FAIL_INTEGRITY)
+
+    private fun recordStat(pkg: String, category: String, methodLabel: String) {
         when (category) {
             "pin" -> pendingPinEvents.incrementAndGet()
             "focus" -> pendingFocusEvents.incrementAndGet()
             "lifecycle" -> pendingLifecycleEvents.incrementAndGet()
             "webview" -> pendingWebViewEvents.incrementAndGet()
+            "cloak" -> pendingCloakEvents.incrementAndGet()
         }
+        val cleanMethod = methodLabel.replace("|", ".").replace(";", ",")
+        val key = "$category|$cleanMethod"
+        val counter = pendingMethodEvents[key] ?: run {
+            val fresh = AtomicLong(0L)
+            pendingMethodEvents.putIfAbsent(key, fresh) ?: fresh
+        }
+        counter.incrementAndGet()
         scheduleStatsFlush(pkg)
     }
 
@@ -163,7 +224,22 @@ class PinSpoofModule : IXposedHookLoadPackage {
         val focus = pendingFocusEvents.getAndSet(0L)
         val lifecycle = pendingLifecycleEvents.getAndSet(0L)
         val webview = pendingWebViewEvents.getAndSet(0L)
-        if (pin + focus + lifecycle + webview == 0L) return
+        val cloak = pendingCloakEvents.getAndSet(0L)
+
+        val sb = StringBuilder()
+        val iter = pendingMethodEvents.entries.iterator()
+        var entries = 0
+        while (iter.hasNext() && entries < 16) {
+            val (k, atomicCount) = iter.next()
+            val delta = atomicCount.getAndSet(0L)
+            if (delta > 0L) {
+                if (sb.isNotEmpty()) sb.append(';')
+                sb.append(k).append('|').append(delta)
+                entries++
+            }
+        }
+
+        if (pin + focus + lifecycle + webview + cloak == 0L && sb.isEmpty()) return
         lastFlushMs.set(SystemClock.elapsedRealtime())
         runCatching {
             val intent = Intent(HookConfig.STATS_ACTION).apply {
@@ -173,6 +249,8 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 putExtra("focus", focus)
                 putExtra("lifecycle", lifecycle)
                 putExtra("webview", webview)
+                putExtra("cloak", cloak)
+                putExtra("events", sb.toString())
             }
             context.sendBroadcast(intent)
         }
@@ -180,13 +258,14 @@ class PinSpoofModule : IXposedHookLoadPackage {
 
     private fun markPinned(pkg: String, source: String) {
         spoofedPinned.set(true)
-        recordStat(pkg, "pin")
+        recordStat(pkg, "pin", source)
         log(pkg, "Blocked real pinning via $source; spoofed state = LOCK_TASK_MODE_PINNED (2)")
     }
 
     private fun markUnpinned(pkg: String, source: String) {
         if (!isAlwaysPinned(pkg)) {
             spoofedPinned.set(false)
+            recordStat(pkg, "pin", source)
             log(pkg, "Intercepted unpin via $source; spoofed state = LOCK_TASK_MODE_NONE (0)")
         } else {
             log(pkg, "Intercepted unpin via $source; maintaining always_spoof_pinned = true")
@@ -249,6 +328,27 @@ class PinSpoofModule : IXposedHookLoadPackage {
         }
         if (readBool(pkg, "retain_audio_focus", HookConfig.RETAIN_AUDIO_FOCUS)) {
             hookAudioFocusRetention(lpparam)
+        }
+        if (readBool(pkg, "cloak_packages_installer", HookConfig.CLOAK_PACKAGES_INSTALLER)) {
+            hookPackageAndInstallerCloaking(lpparam)
+        }
+        if (readBool(pkg, "sanitize_stack_traces", HookConfig.SANITIZE_STACK_TRACES)) {
+            hookStackTraceSanitization(pkg)
+        }
+        if (readBool(pkg, "spoof_motion_sensors", HookConfig.SPOOF_MOTION_SENSORS)) {
+            hookSensorSpoofing(lpparam)
+        }
+        if (readBool(pkg, "bypass_virtual_displays", HookConfig.BYPASS_VIRTUAL_DISPLAYS)) {
+            hookVirtualDisplayBypass(lpparam)
+        }
+        if (readBool(pkg, "unblock_clipboard", HookConfig.UNBLOCK_CLIPBOARD)) {
+            hookClipboardBypass(lpparam)
+        }
+        if (readBool(pkg, "spoof_package_signature", HookConfig.SPOOF_PACKAGE_SIGNATURE)) {
+            hookPackageSignatureSpoof(lpparam)
+        }
+        if (readBool(pkg, "soft_fail_integrity", HookConfig.SOFT_FAIL_INTEGRITY)) {
+            hookIntegritySoftFail(lpparam)
         }
         if (readBool(pkg, "hook_settings_lock_to_app", HookConfig.HOOK_SETTINGS_LOCK_TO_APP)) {
             hookSettingsLockToApp(lpparam)
@@ -327,6 +427,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldSpoofAsPinned(pkg)) {
                             param.result = ActivityManager.LOCK_TASK_MODE_PINNED
+                            recordStat(pkg, "pin", "ActivityManager.getLockTaskModeState()")
                             log(pkg, "ActivityManager.getLockTaskModeState() -> LOCK_TASK_MODE_PINNED (2)")
                         }
                     }
@@ -345,6 +446,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldSpoofAsPinned(pkg)) {
                             param.result = true
+                            recordStat(pkg, "pin", "ActivityManager.isInLockTaskMode()")
                             log(pkg, "ActivityManager.isInLockTaskMode() -> true")
                         }
                     }
@@ -357,8 +459,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
 
     private fun hookActivityClient(lpparam: LoadPackageParam) {
         val pkg = lpparam.packageName
-        // Android 12-16 (API 31-36) routes Activity.startLockTask through android.app.ActivityClient.
-        // Scan method names dynamically so OEM-customized signatures never throw NoSuchMethodError.
         val activityClientClass = XposedHelpers.findClassIfExists(
             "android.app.ActivityClient",
             lpparam.classLoader
@@ -393,12 +493,12 @@ class PinSpoofModule : IXposedHookLoadPackage {
                                     when {
                                         name.startsWith("startLockTask") -> {
                                             if (!isModuleEnabled(pkg)) return
-                                            markPinned(pkg, "$label.$name")
+                                            markPinned(pkg, "$label.$name()")
                                             param.result = defaultReturnFor(method.returnType)
                                         }
                                         name.startsWith("stopLockTask") -> {
                                             if (!isModuleEnabled(pkg)) return
-                                            markUnpinned(pkg, "$label.$name")
+                                            markUnpinned(pkg, "$label.$name()")
                                             param.result = defaultReturnFor(method.returnType)
                                         }
                                         name == "getLockTaskModeState" -> {
@@ -431,7 +531,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private fun hookFocusLossSpoof(lpparam: LoadPackageParam) {
         val pkg = lpparam.packageName
 
-        // 1. Drop View.dispatchWindowFocusChanged(false) before views/listeners see focus loss
         runCatching {
             XposedHelpers.findAndHookMethod(
                 View::class.java,
@@ -440,7 +539,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg) && param.args[0] == false) {
-                            recordStat(pkg, "focus")
+                            recordStat(pkg, "focus", "View.dispatchWindowFocusChanged(false)")
                             param.result = null
                         }
                     }
@@ -448,7 +547,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 2. Drop ViewTreeObserver.dispatchOnWindowFocusChange(false)
         runCatching {
             XposedBridge.hookAllMethods(
                 ViewTreeObserver::class.java,
@@ -463,7 +561,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 3. Intercept DecorView.onWindowFocusChanged(false)
         val decorViewClass = XposedHelpers.findClassIfExists(
             "com.android.internal.policy.DecorView",
             lpparam.classLoader
@@ -485,7 +582,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             }
         }
 
-        // 4. Intercept Activity.onWindowFocusChanged(false) & Activity.hasWindowFocus()
         runCatching {
             XposedHelpers.findAndHookMethod(
                 Activity::class.java,
@@ -494,7 +590,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg) && param.args[0] == false) {
-                            recordStat(pkg, "focus")
+                            recordStat(pkg, "focus", "Activity.onWindowFocusChanged(false)")
                             param.args[0] = true
                         }
                     }
@@ -506,6 +602,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg)) {
+                            recordStat(pkg, "focus", "Activity.hasWindowFocus()")
                             param.result = true
                         }
                     }
@@ -513,7 +610,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 5. Force View.hasWindowFocus() -> true
         runCatching {
             XposedHelpers.findAndHookMethod(
                 View::class.java,
@@ -528,7 +624,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 6. Android 10-16: suppress onTopResumedActivityChanged(false)
         runCatching {
             XposedBridge.hookAllMethods(
                 Activity::class.java,
@@ -536,7 +631,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg) && param.args.isNotEmpty() && param.args[0] == false) {
-                            recordStat(pkg, "focus")
+                            recordStat(pkg, "focus", "Activity.onTopResumedActivityChanged(false)")
                             log(pkg, "Suppressed performTopResumedActivityChanged(false)")
                             param.result = null
                         }
@@ -545,7 +640,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 7. Safe Recents/Home hint suppression (does NOT block Activity.onPause/onStop surfaces)
         runCatching {
             XposedBridge.hookAllMethods(
                 Activity::class.java,
@@ -553,7 +647,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg)) {
-                            recordStat(pkg, "focus")
+                            recordStat(pkg, "focus", "Activity.onUserLeaveHint()")
                             log(pkg, "Suppressed Activity.performUserLeaving() safely")
                             param.result = null
                         }
@@ -562,7 +656,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 8. Spoof ActivityManager.getMyMemoryState() so process importance stays IMPORTANCE_FOREGROUND
         runCatching {
             XposedHelpers.findAndHookMethod(
                 ActivityManager::class.java,
@@ -586,7 +679,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             lpparam.classLoader
         ) ?: return
 
-        // 1. Keep WebView window visibility reporting View.VISIBLE
         runCatching {
             XposedBridge.hookAllMethods(
                 webViewClass,
@@ -594,7 +686,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideWebView(pkg) && param.args.isNotEmpty() && param.args[0] != View.VISIBLE) {
-                            recordStat(pkg, "webview")
+                            recordStat(pkg, "webview", "WebView.onWindowVisibilityChanged()")
                             param.args[0] = View.VISIBLE
                         }
                     }
@@ -602,7 +694,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 2. Optionally block WebView.onPause() / pauseTimers() for stubborn players/timers
         runCatching {
             XposedBridge.hookAllMethods(
                 webViewClass,
@@ -610,7 +701,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideWebView(pkg)) {
-                            recordStat(pkg, "webview")
+                            recordStat(pkg, "webview", "WebView.onPause()")
                             log(pkg, "Suppressed WebView.onPause()")
                             param.result = null
                         }
@@ -623,7 +714,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideWebView(pkg)) {
-                            recordStat(pkg, "webview")
+                            recordStat(pkg, "webview", "WebView.pauseTimers()")
                             log(pkg, "Suppressed WebView.pauseTimers()")
                             param.result = null
                         }
@@ -632,7 +723,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 3. Inject DOM Page Visibility & Fullscreen stealth JS on WebView page completion
         runCatching {
             XposedBridge.hookAllMethods(
                 WebViewClient::class.java,
@@ -698,7 +788,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
             webView.post {
                 runCatching {
                     webView.evaluateJavascript(WEBVIEW_STEALTH_JS, null)
-                    recordStat(pkg, "webview")
+                    recordStat(pkg, "webview", "WebView.evaluateJavascript(stealth)")
                 }
             }
         }
@@ -707,7 +797,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private fun hookLifecycleStealth(lpparam: LoadPackageParam) {
         val pkg = lpparam.packageName
 
-        // Suppress Application.ActivityLifecycleCallbacks paused/stopped dispatches
         runCatching {
             XposedBridge.hookAllMethods(
                 Application::class.java,
@@ -716,7 +805,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val act = param.args.firstOrNull() as? Activity
                         if (shouldHideLifecycle(pkg) && act?.isFinishing != true) {
-                            recordStat(pkg, "lifecycle")
+                            recordStat(pkg, "lifecycle", "Application.dispatchActivityPaused()")
                             param.result = null
                         }
                     }
@@ -729,7 +818,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val act = param.args.firstOrNull() as? Activity
                         if (shouldHideLifecycle(pkg) && act?.isFinishing != true) {
-                            recordStat(pkg, "lifecycle")
+                            recordStat(pkg, "lifecycle", "Application.dispatchActivityStopped()")
                             param.result = null
                         }
                     }
@@ -737,7 +826,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // Suppress Jetpack LifecycleRegistry ON_PAUSE / ON_STOP
         val lifecycleRegistryClass = XposedHelpers.findClassIfExists(
             "androidx.lifecycle.LifecycleRegistry",
             lpparam.classLoader
@@ -752,7 +840,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             if (!shouldHideLifecycle(pkg)) return
                             val eventName = param.args.firstOrNull()?.toString() ?: return
                             if (eventName == "ON_PAUSE" || eventName == "ON_STOP") {
-                                recordStat(pkg, "lifecycle")
+                                recordStat(pkg, "lifecycle", "LifecycleRegistry($eventName)")
                                 log(pkg, "Suppressed LifecycleRegistry.handleLifecycleEvent($eventName)")
                                 param.result = null
                             }
@@ -772,6 +860,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 name.startsWith("com.android.") ||
                 name.startsWith("java.")
             if (!isFramework && hookedActivityClasses.add(name)) {
+                val simpleName = cls.simpleName
                 runCatching {
                     val onPause = cls.getDeclaredMethod("onPause")
                     XposedBridge.hookMethod(onPause, object : XC_MethodHook() {
@@ -779,7 +868,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             val act = param.thisObject as? Activity ?: return
                             if (shouldHideLifecycle(pkg) && !act.isFinishing) {
                                 XposedHelpers.setBooleanField(act, "mCalled", true)
-                                recordStat(pkg, "lifecycle")
+                                recordStat(pkg, "lifecycle", "$simpleName.onPause()")
                                 log(pkg, "Suppressed $name.onPause()")
                                 param.result = null
                             }
@@ -793,7 +882,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             val act = param.thisObject as? Activity ?: return
                             if (shouldHideLifecycle(pkg) && !act.isFinishing) {
                                 XposedHelpers.setBooleanField(act, "mCalled", true)
-                                recordStat(pkg, "lifecycle")
+                                recordStat(pkg, "lifecycle", "$simpleName.onStop()")
                                 log(pkg, "Suppressed $name.onStop()")
                                 param.result = null
                             }
@@ -805,7 +894,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     XposedBridge.hookMethod(onUserLeaveHint, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (shouldHideFocus(pkg) || shouldHideLifecycle(pkg)) {
-                                recordStat(pkg, "focus")
+                                recordStat(pkg, "focus", "$simpleName.onUserLeaveHint()")
                                 log(pkg, "Suppressed $name.onUserLeaveHint()")
                                 param.result = null
                             }
@@ -820,7 +909,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     XposedBridge.hookMethod(onFocusChanged, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (shouldHideFocus(pkg) && param.args[0] == false) {
-                                recordStat(pkg, "focus")
+                                recordStat(pkg, "focus", "$simpleName.onWindowFocusChanged(false)")
                                 log(pkg, "Suppressed $name.onWindowFocusChanged(false)")
                                 param.result = null
                             }
@@ -940,6 +1029,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         ) {
                             param.args[0] = flags and WindowManager.LayoutParams.FLAG_SECURE.inv()
                             param.args[1] = mask and WindowManager.LayoutParams.FLAG_SECURE.inv()
+                            recordStat(pkg, "cloak", "Window.setFlags(FLAG_SECURE)")
                             log(pkg, "Stripped FLAG_SECURE from Window.setFlags()")
                         }
                     }
@@ -953,6 +1043,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldStripFlagSecure(pkg) && param.args[0] == true) {
                             param.args[0] = false
+                            recordStat(pkg, "cloak", "SurfaceView.setSecure()")
                             log(pkg, "Stripped FLAG_SECURE from SurfaceView.setSecure()")
                         }
                     }
@@ -972,6 +1063,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideAccessibility(pkg)) {
                             param.result = Collections.emptyList<Any>()
+                            recordStat(pkg, "cloak", "AccessibilityManager.getEnabledList()")
                             log(pkg, "AccessibilityManager.getEnabledAccessibilityServiceList() -> emptyList")
                         }
                     }
@@ -987,6 +1079,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideAccessibility(pkg)) {
                             param.result = false
+                            recordStat(pkg, "cloak", "Settings.canDrawOverlays()")
                             log(pkg, "Settings.canDrawOverlays() -> false")
                         }
                     }
@@ -1011,6 +1104,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                                     if (!shouldRetainAudioFocus(pkg)) return
                                     val change = p.args[0] as? Int ?: return
                                     if (change < 0) {
+                                        recordStat(pkg, "focus", "OnAudioFocusChange($change)")
                                         log(pkg, "Suppressed audio focus loss ($change) on ${cls.simpleName}")
                                         p.result = null
                                     }
@@ -1055,6 +1149,426 @@ class PinSpoofModule : IXposedHookLoadPackage {
         }
     }
 
+    private fun hookPackageAndInstallerCloaking(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        val appPmClass = XposedHelpers.findClassIfExists(
+            "android.app.ApplicationPackageManager",
+            lpparam.classLoader
+        ) ?: return
+
+        runCatching {
+            @Suppress("DEPRECATION")
+            XposedBridge.hookAllMethods(
+                appPmClass,
+                "getInstallerPackageName",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldCloakPackages(pkg)) return
+                        val queried = param.args.firstOrNull() as? String
+                        if (queried == pkg) {
+                            param.result = "com.android.vending"
+                            recordStat(pkg, "cloak", "PackageManager.getInstallerPackageName()")
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                appPmClass,
+                "getInstalledPackages",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldCloakPackages(pkg)) return
+                        val list = (param.result as? List<*>) ?: return
+                        val filtered = list.filter { item ->
+                            val p = (item as? PackageInfo)?.packageName
+                            p == null || p !in CLOAKED_PACKAGES
+                        }
+                        if (filtered.size != list.size) {
+                            param.result = filtered
+                            recordStat(pkg, "cloak", "PackageManager.getInstalledPackages()")
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                appPmClass,
+                "getInstalledApplications",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldCloakPackages(pkg)) return
+                        val list = (param.result as? List<*>) ?: return
+                        val filtered = list.filter { item ->
+                            val p = (item as? ApplicationInfo)?.packageName
+                            p == null || p !in CLOAKED_PACKAGES
+                        }
+                        if (filtered.size != list.size) {
+                            param.result = filtered
+                            recordStat(pkg, "cloak", "PackageManager.getInstalledApplications()")
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                appPmClass,
+                "queryIntentActivities",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldCloakPackages(pkg)) return
+                        val list = (param.result as? List<*>) ?: return
+                        val filtered = list.filter { item ->
+                            val p = (item as? ResolveInfo)?.activityInfo?.packageName
+                            p == null || p !in CLOAKED_PACKAGES
+                        }
+                        if (filtered.size != list.size) {
+                            param.result = filtered
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                appPmClass,
+                "getPackageInfo",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldCloakPackages(pkg)) return
+                        val queried = param.args.firstOrNull() as? String ?: return
+                        if (queried in CLOAKED_PACKAGES) {
+                            recordStat(pkg, "cloak", "PackageManager.getPackageInfo(hidden)")
+                            param.throwable = PackageManager.NameNotFoundException(queried)
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun hookStackTraceSanitization(pkg: String) {
+        val filterFrames = { frames: Array<StackTraceElement>? ->
+            if (frames == null) null
+            else frames.filter { el ->
+                val cls = el.className
+                STACK_FILTER_MARKERS.none { marker -> cls.contains(marker, ignoreCase = true) }
+            }.toTypedArray()
+        }
+
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                Thread::class.java,
+                "getStackTrace",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldSanitizeStackTraces(pkg) || inStackSanitize.get() == true) return
+                        inStackSanitize.set(true)
+                        try {
+                            @Suppress("UNCHECKED_CAST")
+                            val raw = param.result as? Array<StackTraceElement> ?: return
+                            val clean = filterFrames(raw) ?: return
+                            if (clean.size != raw.size) {
+                                param.result = clean
+                                recordStat(pkg, "cloak", "Thread.getStackTrace()")
+                            }
+                        } finally {
+                            inStackSanitize.set(false)
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                Throwable::class.java,
+                "getStackTrace",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldSanitizeStackTraces(pkg) || inStackSanitize.get() == true) return
+                        inStackSanitize.set(true)
+                        try {
+                            @Suppress("UNCHECKED_CAST")
+                            val raw = param.result as? Array<StackTraceElement> ?: return
+                            val clean = filterFrames(raw) ?: return
+                            if (clean.size != raw.size) {
+                                param.result = clean
+                                recordStat(pkg, "cloak", "Throwable.getStackTrace()")
+                            }
+                        } finally {
+                            inStackSanitize.set(false)
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun hookSensorSpoofing(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        runCatching {
+            XposedBridge.hookAllMethods(
+                SensorManager::class.java,
+                "registerListener",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val listener = param.args.firstOrNull { it is SensorEventListener } as? SensorEventListener
+                            ?: return
+                        val cls = listener.javaClass
+                        if (hookedSensorListeners.add(cls.name)) {
+                            runCatching {
+                                XposedHelpers.findAndHookMethod(
+                                    cls,
+                                    "onSensorChanged",
+                                    SensorEvent::class.java,
+                                    object : XC_MethodHook() {
+                                        override fun beforeHookedMethod(p: MethodHookParam) {
+                                            if (!shouldSpoofSensors(pkg)) return
+                                            val ev = p.args.firstOrNull() as? SensorEvent ?: return
+                                            val values = ev.values ?: return
+                                            when (ev.sensor?.type) {
+                                                Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_GRAVITY -> {
+                                                    if (values.size >= 3) {
+                                                        values[0] = 0f
+                                                        values[1] = 0f
+                                                        values[2] = SensorManager.GRAVITY_EARTH
+                                                        recordStat(pkg, "cloak", "Sensor.Accelerometer")
+                                                    }
+                                                }
+                                                Sensor.TYPE_GYROSCOPE, Sensor.TYPE_LINEAR_ACCELERATION -> {
+                                                    if (values.size >= 3) {
+                                                        values[0] = 0f
+                                                        values[1] = 0f
+                                                        values[2] = 0f
+                                                        recordStat(pkg, "cloak", "Sensor.Gyroscope")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                SensorManager::class.java,
+                "requestTriggerSensor",
+                TriggerEventListener::class.java,
+                Sensor::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldSpoofSensors(pkg)) return
+                        val sensor = param.args[1] as? Sensor ?: return
+                        if (sensor.type == Sensor.TYPE_SIGNIFICANT_MOTION) {
+                            recordStat(pkg, "cloak", "Sensor.SignificantMotion")
+                            param.result = false
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun hookVirtualDisplayBypass(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        runCatching {
+            XposedBridge.hookAllMethods(
+                DisplayManager::class.java,
+                "getDisplays",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldBypassVirtualDisplays(pkg)) return
+                        @Suppress("UNCHECKED_CAST")
+                        val displays = param.result as? Array<Display> ?: return
+                        if (displays.size > 1) {
+                            val primary = displays.firstOrNull { it.displayId == Display.DEFAULT_DISPLAY }
+                                ?: displays.first()
+                            param.result = arrayOf(primary)
+                            recordStat(pkg, "cloak", "DisplayManager.getDisplays()")
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                DisplayManager::class.java,
+                "getDisplay",
+                Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldBypassVirtualDisplays(pkg)) return
+                        val id = param.args[0] as? Int ?: return
+                        if (id != Display.DEFAULT_DISPLAY) {
+                            recordStat(pkg, "cloak", "DisplayManager.getDisplay($id)")
+                            param.result = null
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                DisplayManager::class.java,
+                "registerDisplayListener",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val listener = param.args.firstOrNull { it is DisplayManager.DisplayListener }
+                            as? DisplayManager.DisplayListener ?: return
+                        val cls = listener.javaClass
+                        if (hookedDisplayListeners.add(cls.name)) {
+                            listOf("onDisplayAdded", "onDisplayChanged", "onDisplayRemoved").forEach { mName ->
+                                runCatching {
+                                    XposedHelpers.findAndHookMethod(
+                                        cls,
+                                        mName,
+                                        Int::class.javaPrimitiveType,
+                                        object : XC_MethodHook() {
+                                            override fun beforeHookedMethod(p: MethodHookParam) {
+                                                if (!shouldBypassVirtualDisplays(pkg)) return
+                                                val id = p.args[0] as? Int ?: return
+                                                if (id != Display.DEFAULT_DISPLAY) {
+                                                    recordStat(pkg, "cloak", "DisplayListener.$mName()")
+                                                    p.result = null
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun hookClipboardBypass(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                XposedHelpers.findAndHookMethod(
+                    ClipboardManager::class.java,
+                    "clearPrimaryClip",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldUnblockClipboard(pkg)) {
+                                recordStat(pkg, "cloak", "ClipboardManager.clearPrimaryClip()")
+                                log(pkg, "Blocked ClipboardManager.clearPrimaryClip()")
+                                param.result = null
+                            }
+                        }
+                    }
+                )
+            }
+            XposedHelpers.findAndHookMethod(
+                ClipboardManager::class.java,
+                "setPrimaryClip",
+                ClipData::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldUnblockClipboard(pkg)) return
+                        val clip = param.args[0] as? ClipData
+                        val isEmptyClear = clip == null ||
+                            clip.itemCount == 0 ||
+                            (clip.itemCount == 1 && clip.getItemAt(0)?.text?.isBlank() == true)
+                        if (isEmptyClear) {
+                            recordStat(pkg, "cloak", "ClipboardManager.setPrimaryClip(empty)")
+                            log(pkg, "Blocked blank ClipboardManager.setPrimaryClip() wipe")
+                            param.result = null
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun hookPackageSignatureSpoof(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        val buildSpoofSig = {
+            val hex = readString(pkg, "spoof_signature_hex", HookConfig.SPOOF_SIGNATURE_HEX)
+                .replace(":", "")
+                .replace(" ", "")
+                .trim()
+            if (hex.isNotEmpty() && hex.length >= 128) {
+                runCatching { Signature(hex) }.getOrNull()
+            } else {
+                null
+            }
+        }
+
+        val appPmClass = XposedHelpers.findClassIfExists(
+            "android.app.ApplicationPackageManager",
+            lpparam.classLoader
+        )
+        if (appPmClass != null) {
+            runCatching {
+                @Suppress("DEPRECATION")
+                XposedBridge.hookAllMethods(
+                    appPmClass,
+                    "getPackageInfo",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!shouldSpoofSignature(pkg)) return
+                            val queriedPkg = param.args.firstOrNull() as? String ?: return
+                            if (queriedPkg != pkg) return
+                            val info = param.result as? PackageInfo ?: return
+                            val sig = buildSpoofSig() ?: return
+                            info.signatures = arrayOf(sig)
+                            recordStat(pkg, "cloak", "PackageInfo.signatures")
+                        }
+                    }
+                )
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfoClass = XposedHelpers.findClassIfExists(
+                "android.content.pm.SigningInfo",
+                lpparam.classLoader
+            )
+            if (signingInfoClass != null) {
+                runCatching {
+                    listOf("getApkContentsSigners", "getSigningCertificateHistory").forEach { mName ->
+                        XposedBridge.hookAllMethods(
+                            signingInfoClass,
+                            mName,
+                            object : XC_MethodHook() {
+                                override fun afterHookedMethod(param: MethodHookParam) {
+                                    if (!shouldSpoofSignature(pkg)) return
+                                    val sig = buildSpoofSig() ?: return
+                                    param.result = arrayOf(sig)
+                                    recordStat(pkg, "cloak", "SigningInfo.$mName()")
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun hookIntegritySoftFail(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        val taskClass = XposedHelpers.findClassIfExists(
+            "com.google.android.gms.tasks.Task",
+            lpparam.classLoader
+        )
+        if (taskClass != null) {
+            runCatching {
+                XposedBridge.hookAllMethods(
+                    taskClass,
+                    "getException",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!shouldSoftFailIntegrity(pkg)) return
+                            val ex = param.result as? Throwable ?: return
+                            val msg = "${ex.javaClass.name} ${ex.message}"
+                            if (msg.contains("Integrity", ignoreCase = true) ||
+                                msg.contains("SafetyNet", ignoreCase = true) ||
+                                msg.contains("attest", ignoreCase = true)
+                            ) {
+                                recordStat(pkg, "cloak", "PlayIntegrity.softFail")
+                                param.result = null
+                            }
+                        }
+                    }
+                )
+            }
+        }
+    }
+
     private fun hookSettingsLockToApp(lpparam: LoadPackageParam) {
         val pkg = lpparam.packageName
         runCatching {
@@ -1068,6 +1582,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (param.args[1] == "lock_to_app_enabled") {
                             param.result = 1
+                            recordStat(pkg, "pin", "Settings.System.lock_to_app")
                             log(pkg, "Settings.System[lock_to_app_enabled] -> 1")
                         }
                     }
@@ -1102,6 +1617,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (param.args[0] == pkg) {
                             param.result = true
+                            recordStat(pkg, "pin", "DevicePolicyManager.isLockTaskPermitted()")
                             log(pkg, "DevicePolicyManager.isLockTaskPermitted($pkg) -> true")
                         }
                     }
@@ -1113,6 +1629,23 @@ class PinSpoofModule : IXposedHookLoadPackage {
     }
 
     companion object {
+        private val CLOAKED_PACKAGES = setOf(
+            "de.robv.android.xposed.installer",
+            "org.lsposed.manager",
+            "io.github.lsposed.manager",
+            "app.morphe.manager",
+            "com.topjohnwu.magisk",
+            "us.redcatx.pinspoof"
+        )
+
+        private val STACK_FILTER_MARKERS = listOf(
+            "de.robv.android.xposed",
+            "LSPHooker",
+            "EdHooker",
+            "me.weishu.epic",
+            "us.redcatx.pinspoof"
+        )
+
         private const val WEBVIEW_STEALTH_JS = """
             (function() {
               if (window.__pinspoofStealthApplied) return;

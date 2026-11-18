@@ -22,6 +22,7 @@ function parseScopes(raw: string): string[] {
 }
 
 function generateHookConfigKt(config: ModuleConfig, pkg: string): string {
+  const escapedSigHex = config.spoofSignatureHex.replace(/["\\]/g, '').trim();
   return `package ${pkg}
 
 /**
@@ -32,6 +33,7 @@ function generateHookConfigKt(config: ModuleConfig, pkg: string): string {
  */
 object HookConfig {
     const val MODULE_TAG = "${config.moduleName}"
+    const val VERSION_NAME = "${config.versionName}"
     const val MODULE_PKG = "${pkg}"
     const val PREFS_NAME = "pinspoof_prefs"
     const val STATS_PREFS_NAME = "pinspoof_stats"
@@ -52,6 +54,14 @@ object HookConfig {
     const val STRIP_FLAG_SECURE = ${config.stripFlagSecure}
     const val HIDE_ACCESSIBILITY_OVERLAYS = ${config.hideAccessibilityAndOverlays}
     const val RETAIN_AUDIO_FOCUS = ${config.retainAudioFocus}
+    const val CLOAK_PACKAGES_INSTALLER = ${config.cloakPackagesAndInstaller}
+    const val SANITIZE_STACK_TRACES = ${config.sanitizeStackTraces}
+    const val SPOOF_MOTION_SENSORS = ${config.spoofMotionSensors}
+    const val BYPASS_VIRTUAL_DISPLAYS = ${config.bypassVirtualDisplays}
+    const val UNBLOCK_CLIPBOARD = ${config.unblockClipboard}
+    const val SPOOF_PACKAGE_SIGNATURE = ${config.spoofPackageSignature}
+    const val SPOOF_SIGNATURE_HEX = "${escapedSigHex}"
+    const val SOFT_FAIL_INTEGRITY = ${config.softFailIntegrityChecks}
     const val DEBUG_LOGGING = ${config.debugLogging}
 }
 `;
@@ -63,6 +73,8 @@ function generateStatsReceiverKt(pkg: string): string {
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import org.json.JSONArray
+import org.json.JSONObject
 
 class PinSpoofStatsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -72,21 +84,76 @@ class PinSpoofStatsReceiver : BroadcastReceiver() {
         val focusDelta = intent.getLongExtra("focus", 0L).coerceAtLeast(0L)
         val lifecycleDelta = intent.getLongExtra("lifecycle", 0L).coerceAtLeast(0L)
         val webviewDelta = intent.getLongExtra("webview", 0L).coerceAtLeast(0L)
-        if (pinDelta + focusDelta + lifecycleDelta + webviewDelta == 0L) return
+        val cloakDelta = intent.getLongExtra("cloak", 0L).coerceAtLeast(0L)
+        val eventsRaw = intent.getStringExtra("events").orEmpty()
+        if (pinDelta + focusDelta + lifecycleDelta + webviewDelta + cloakDelta == 0L && eventsRaw.isBlank()) {
+            return
+        }
 
         val prefs = context.getSharedPreferences(HookConfig.STATS_PREFS_NAME, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
+
+        val existingLog = runCatching {
+            JSONArray(prefs.getString("events_log", "[]") ?: "[]")
+        }.getOrElse { JSONArray() }
+
+        val merged = mutableListOf<JSONObject>()
+        for (i in 0 until existingLog.length()) {
+            existingLog.optJSONObject(i)?.let { merged.add(it) }
+        }
+
+        if (eventsRaw.isNotBlank()) {
+            eventsRaw.split(";").forEach { token ->
+                val parts = token.split("|")
+                if (parts.size >= 3) {
+                    val cat = parts[0].trim()
+                    val method = parts[1].trim()
+                    val delta = parts[2].toLongOrNull() ?: 1L
+                    if (cat.isNotEmpty() && method.isNotEmpty() && delta > 0L) {
+                        val existingIdx = merged.indexOfFirst {
+                            it.optString("pkg") == pkg &&
+                                it.optString("category") == cat &&
+                                it.optString("method") == method
+                        }
+                        if (existingIdx >= 0) {
+                            val prev = merged.removeAt(existingIdx)
+                            prev.put("count", prev.optLong("count", 0L) + delta)
+                            prev.put("ts", now)
+                            merged.add(0, prev)
+                        } else {
+                            merged.add(
+                                0,
+                                JSONObject().apply {
+                                    put("pkg", pkg)
+                                    put("category", cat)
+                                    put("method", method)
+                                    put("count", delta)
+                                    put("ts", now)
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        val capped = JSONArray()
+        merged.take(80).forEach { capped.put(it) }
+
         prefs.edit()
-            .putLong("$pkg::pin", prefs.getLong("$pkg::pin", 0L) + pinDelta)
-            .putLong("$pkg::focus", prefs.getLong("$pkg::focus", 0L) + focusDelta)
-            .putLong("$pkg::lifecycle", prefs.getLong("$pkg::lifecycle", 0L) + lifecycleDelta)
-            .putLong("$pkg::webview", prefs.getLong("$pkg::webview", 0L) + webviewDelta)
-            .putLong("$pkg::ts", now)
+            .putLong("\$pkg::pin", prefs.getLong("\$pkg::pin", 0L) + pinDelta)
+            .putLong("\$pkg::focus", prefs.getLong("\$pkg::focus", 0L) + focusDelta)
+            .putLong("\$pkg::lifecycle", prefs.getLong("\$pkg::lifecycle", 0L) + lifecycleDelta)
+            .putLong("\$pkg::webview", prefs.getLong("\$pkg::webview", 0L) + webviewDelta)
+            .putLong("\$pkg::cloak", prefs.getLong("\$pkg::cloak", 0L) + cloakDelta)
+            .putLong("\$pkg::ts", now)
             .putLong("__all__::pin", prefs.getLong("__all__::pin", 0L) + pinDelta)
             .putLong("__all__::focus", prefs.getLong("__all__::focus", 0L) + focusDelta)
             .putLong("__all__::lifecycle", prefs.getLong("__all__::lifecycle", 0L) + lifecycleDelta)
             .putLong("__all__::webview", prefs.getLong("__all__::webview", 0L) + webviewDelta)
+            .putLong("__all__::cloak", prefs.getLong("__all__::cloak", 0L) + cloakDelta)
             .putLong("__all__::ts", now)
+            .putString("events_log", capped.toString())
             .apply()
     }
 }
@@ -100,16 +167,30 @@ import android.app.Activity
 import android.app.ActivityManager
 import android.app.Application
 import android.app.admin.DevicePolicyManager
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
+import android.content.pm.Signature
 import android.graphics.Insets
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.hardware.TriggerEventListener
+import android.hardware.display.DisplayManager
 import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
+import android.view.Display
 import android.view.SurfaceView
 import android.view.View
 import android.view.ViewTreeObserver
@@ -132,16 +213,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * ${config.moduleName} v${config.versionName} — App-Scoped LockTask & Focus/UI Stealth Module (Android 7 – 16 / API 24 – 36)
+ * ${config.moduleName} v${config.versionName} — App-Scoped LockTask, Anti-Detection & UI Stealth Module (Android 7 – 16 / API 24 – 36)
  *
- * Safer v1.2.0 architecture:
- * 1. Reactive mode + safe Window Focus spoofing are ON by default; aggressive lifecycle pause/stop
- *    blocking, WebView visibility/pause suppression, and Binder Stub$Proxy hooks are OFF by default
- *    to prevent SurfaceView black screens, RenderProcessGone crashes, and OEM signature mismatches.
- * 2. Dynamic method-name scanning for ActivityClient & Binder Stub$Proxy with strict error guards.
- * 3. Optional Page Visibility / Fullscreen JS injection for WebView, zeroed pinned WindowInsets
- *    simulation, FLAG_SECURE stripping, accessibility/overlay bypass, audio focus retention, and
- *    throttled live event reporting to the PinSpoof UI.
+ * 1. Reactive mode + safe Window Focus spoofing are ON by default; aggressive pause/stop blocking,
+ *    WebView visibility/JS stealth, Binder Stub\$Proxy hooks, anti-detection cloaking, virtual display
+ *    & clipboard bypass, sensor spoofing, signature spoof, and integrity soft-fail are opt-in.
+ * 2. Dynamic method-name scanning for ActivityClient & Binder Stub\$Proxy with strict error guards.
+ * 3. Throttled live event reporting (counts + method-level event log) to the PinSpoof UI.
  */
 class PinSpoofModule : IXposedHookLoadPackage {
 
@@ -149,14 +227,22 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private val hookedActivityClasses = ConcurrentHashMap.newKeySet<String>()
     private val hookedWebViewClients = ConcurrentHashMap.newKeySet<String>()
     private val hookedAudioListeners = ConcurrentHashMap.newKeySet<String>()
+    private val hookedSensorListeners = ConcurrentHashMap.newKeySet<String>()
+    private val hookedDisplayListeners = ConcurrentHashMap.newKeySet<String>()
 
     private val appContextRef = AtomicReferenceContext()
     private val pendingPinEvents = AtomicLong(0L)
     private val pendingFocusEvents = AtomicLong(0L)
     private val pendingLifecycleEvents = AtomicLong(0L)
     private val pendingWebViewEvents = AtomicLong(0L)
+    private val pendingCloakEvents = AtomicLong(0L)
+    private val pendingMethodEvents = ConcurrentHashMap<String, AtomicLong>()
     private val lastFlushMs = AtomicLong(0L)
     private val flushScheduled = AtomicBoolean(false)
+
+    private val inStackSanitize = object : ThreadLocal<Boolean>() {
+        override fun initialValue(): Boolean = false
+    }
 
     private class AtomicReferenceContext {
         @Volatile
@@ -189,9 +275,22 @@ class PinSpoofModule : IXposedHookLoadPackage {
         }
         val hasAppOverride = xPrefs.getBoolean("\${pkg}::override", false)
         return if (hasAppOverride) {
-            xPrefs.getBoolean("\${pkg}::$key", fallback)
+            xPrefs.getBoolean("\${pkg}::\$key", fallback)
         } else {
-            xPrefs.getBoolean("global::$key", fallback)
+            xPrefs.getBoolean("global::\$key", fallback)
+        }
+    }
+
+    private fun readString(pkg: String, key: String, fallback: String): String {
+        val xPrefs = prefs ?: return fallback
+        if (xPrefs.hasFileChanged()) {
+            xPrefs.reload()
+        }
+        val hasAppOverride = xPrefs.getBoolean("\${pkg}::override", false)
+        return if (hasAppOverride) {
+            xPrefs.getString("\${pkg}::\$key", fallback) ?: fallback
+        } else {
+            xPrefs.getString("global::\$key", fallback) ?: fallback
         }
     }
 
@@ -227,13 +326,42 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private fun shouldRetainAudioFocus(pkg: String): Boolean =
         isModuleEnabled(pkg) && readBool(pkg, "retain_audio_focus", HookConfig.RETAIN_AUDIO_FOCUS)
 
-    private fun recordStat(pkg: String, category: String) {
+    private fun shouldCloakPackages(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "cloak_packages_installer", HookConfig.CLOAK_PACKAGES_INSTALLER)
+
+    private fun shouldSanitizeStackTraces(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "sanitize_stack_traces", HookConfig.SANITIZE_STACK_TRACES)
+
+    private fun shouldSpoofSensors(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "spoof_motion_sensors", HookConfig.SPOOF_MOTION_SENSORS)
+
+    private fun shouldBypassVirtualDisplays(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "bypass_virtual_displays", HookConfig.BYPASS_VIRTUAL_DISPLAYS)
+
+    private fun shouldUnblockClipboard(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "unblock_clipboard", HookConfig.UNBLOCK_CLIPBOARD)
+
+    private fun shouldSpoofSignature(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "spoof_package_signature", HookConfig.SPOOF_PACKAGE_SIGNATURE)
+
+    private fun shouldSoftFailIntegrity(pkg: String): Boolean =
+        isModuleEnabled(pkg) && readBool(pkg, "soft_fail_integrity", HookConfig.SOFT_FAIL_INTEGRITY)
+
+    private fun recordStat(pkg: String, category: String, methodLabel: String) {
         when (category) {
             "pin" -> pendingPinEvents.incrementAndGet()
             "focus" -> pendingFocusEvents.incrementAndGet()
             "lifecycle" -> pendingLifecycleEvents.incrementAndGet()
             "webview" -> pendingWebViewEvents.incrementAndGet()
+            "cloak" -> pendingCloakEvents.incrementAndGet()
         }
+        val cleanMethod = methodLabel.replace("|", ".").replace(";", ",")
+        val key = "\$category|\$cleanMethod"
+        val counter = pendingMethodEvents[key] ?: run {
+            val fresh = AtomicLong(0L)
+            pendingMethodEvents.putIfAbsent(key, fresh) ?: fresh
+        }
+        counter.incrementAndGet()
         scheduleStatsFlush(pkg)
     }
 
@@ -259,7 +387,22 @@ class PinSpoofModule : IXposedHookLoadPackage {
         val focus = pendingFocusEvents.getAndSet(0L)
         val lifecycle = pendingLifecycleEvents.getAndSet(0L)
         val webview = pendingWebViewEvents.getAndSet(0L)
-        if (pin + focus + lifecycle + webview == 0L) return
+        val cloak = pendingCloakEvents.getAndSet(0L)
+
+        val sb = StringBuilder()
+        val iter = pendingMethodEvents.entries.iterator()
+        var entries = 0
+        while (iter.hasNext() && entries < 16) {
+            val (k, atomicCount) = iter.next()
+            val delta = atomicCount.getAndSet(0L)
+            if (delta > 0L) {
+                if (sb.isNotEmpty()) sb.append(';')
+                sb.append(k).append('|').append(delta)
+                entries++
+            }
+        }
+
+        if (pin + focus + lifecycle + webview + cloak == 0L && sb.isEmpty()) return
         lastFlushMs.set(SystemClock.elapsedRealtime())
         runCatching {
             val intent = Intent(HookConfig.STATS_ACTION).apply {
@@ -269,6 +412,8 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 putExtra("focus", focus)
                 putExtra("lifecycle", lifecycle)
                 putExtra("webview", webview)
+                putExtra("cloak", cloak)
+                putExtra("events", sb.toString())
             }
             context.sendBroadcast(intent)
         }
@@ -276,22 +421,23 @@ class PinSpoofModule : IXposedHookLoadPackage {
 
     private fun markPinned(pkg: String, source: String) {
         spoofedPinned.set(true)
-        recordStat(pkg, "pin")
-        log(pkg, "Blocked real pinning via $source; spoofed state = LOCK_TASK_MODE_PINNED (2)")
+        recordStat(pkg, "pin", source)
+        log(pkg, "Blocked real pinning via \$source; spoofed state = LOCK_TASK_MODE_PINNED (2)")
     }
 
     private fun markUnpinned(pkg: String, source: String) {
         if (!isAlwaysPinned(pkg)) {
             spoofedPinned.set(false)
-            log(pkg, "Intercepted unpin via $source; spoofed state = LOCK_TASK_MODE_NONE (0)")
+            recordStat(pkg, "pin", source)
+            log(pkg, "Intercepted unpin via \$source; spoofed state = LOCK_TASK_MODE_NONE (0)")
         } else {
-            log(pkg, "Intercepted unpin via $source; maintaining always_spoof_pinned = true")
+            log(pkg, "Intercepted unpin via \$source; maintaining always_spoof_pinned = true")
         }
     }
 
     private fun log(pkg: String, message: String) {
         if (readBool(pkg, "debug_logging", HookConfig.DEBUG_LOGGING)) {
-            XposedBridge.log("[\${HookConfig.MODULE_TAG}][$pkg] $message")
+            XposedBridge.log("[\${HookConfig.MODULE_TAG}][\$pkg] \$message")
         }
     }
 
@@ -303,7 +449,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
 
         val pkg = lpparam.packageName
         if (!isModuleEnabled(pkg)) {
-            log(pkg, "Module disabled for $pkg via granular preferences")
+            log(pkg, "Module disabled for \$pkg via granular preferences")
             return
         }
 
@@ -345,6 +491,27 @@ class PinSpoofModule : IXposedHookLoadPackage {
         }
         if (readBool(pkg, "retain_audio_focus", HookConfig.RETAIN_AUDIO_FOCUS)) {
             hookAudioFocusRetention(lpparam)
+        }
+        if (readBool(pkg, "cloak_packages_installer", HookConfig.CLOAK_PACKAGES_INSTALLER)) {
+            hookPackageAndInstallerCloaking(lpparam)
+        }
+        if (readBool(pkg, "sanitize_stack_traces", HookConfig.SANITIZE_STACK_TRACES)) {
+            hookStackTraceSanitization(pkg)
+        }
+        if (readBool(pkg, "spoof_motion_sensors", HookConfig.SPOOF_MOTION_SENSORS)) {
+            hookSensorSpoofing(lpparam)
+        }
+        if (readBool(pkg, "bypass_virtual_displays", HookConfig.BYPASS_VIRTUAL_DISPLAYS)) {
+            hookVirtualDisplayBypass(lpparam)
+        }
+        if (readBool(pkg, "unblock_clipboard", HookConfig.UNBLOCK_CLIPBOARD)) {
+            hookClipboardBypass(lpparam)
+        }
+        if (readBool(pkg, "spoof_package_signature", HookConfig.SPOOF_PACKAGE_SIGNATURE)) {
+            hookPackageSignatureSpoof(lpparam)
+        }
+        if (readBool(pkg, "soft_fail_integrity", HookConfig.SOFT_FAIL_INTEGRITY)) {
+            hookIntegritySoftFail(lpparam)
         }
         if (readBool(pkg, "hook_settings_lock_to_app", HookConfig.HOOK_SETTINGS_LOCK_TO_APP)) {
             hookSettingsLockToApp(lpparam)
@@ -423,6 +590,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldSpoofAsPinned(pkg)) {
                             param.result = ActivityManager.LOCK_TASK_MODE_PINNED
+                            recordStat(pkg, "pin", "ActivityManager.getLockTaskModeState()")
                             log(pkg, "ActivityManager.getLockTaskModeState() -> LOCK_TASK_MODE_PINNED (2)")
                         }
                     }
@@ -441,6 +609,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldSpoofAsPinned(pkg)) {
                             param.result = true
+                            recordStat(pkg, "pin", "ActivityManager.isInLockTaskMode()")
                             log(pkg, "ActivityManager.isInLockTaskMode() -> true")
                         }
                     }
@@ -453,8 +622,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
 
     private fun hookActivityClient(lpparam: LoadPackageParam) {
         val pkg = lpparam.packageName
-        // Android 12-16 (API 31-36) routes Activity.startLockTask through android.app.ActivityClient.
-        // Scan method names dynamically so OEM-customized signatures never throw NoSuchMethodError.
         val activityClientClass = XposedHelpers.findClassIfExists(
             "android.app.ActivityClient",
             lpparam.classLoader
@@ -465,8 +632,8 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private fun hookBinderProxies(lpparam: LoadPackageParam) {
         val pkg = lpparam.packageName
         listOf(
-            "android.app.IActivityTaskManager\\$Stub\\$Proxy" to "IActivityTaskManager",
-            "android.app.IActivityManager\\$Stub\\$Proxy" to "IActivityManager"
+            "android.app.IActivityTaskManager\\\$Stub\\\$Proxy" to "IActivityTaskManager",
+            "android.app.IActivityManager\\\$Stub\\\$Proxy" to "IActivityManager"
         ).forEach { (className, label) ->
             val proxyClass = XposedHelpers.findClassIfExists(className, lpparam.classLoader)
             if (proxyClass != null) {
@@ -489,12 +656,12 @@ class PinSpoofModule : IXposedHookLoadPackage {
                                     when {
                                         name.startsWith("startLockTask") -> {
                                             if (!isModuleEnabled(pkg)) return
-                                            markPinned(pkg, "$label.$name")
+                                            markPinned(pkg, "\$label.\$name()")
                                             param.result = defaultReturnFor(method.returnType)
                                         }
                                         name.startsWith("stopLockTask") -> {
                                             if (!isModuleEnabled(pkg)) return
-                                            markUnpinned(pkg, "$label.$name")
+                                            markUnpinned(pkg, "\$label.\$name()")
                                             param.result = defaultReturnFor(method.returnType)
                                         }
                                         name == "getLockTaskModeState" -> {
@@ -514,7 +681,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     }
                 }
         }.onFailure {
-            log(pkg, "$label dynamic lock-task hook error: \${it.message}")
+            log(pkg, "\$label dynamic lock-task hook error: \${it.message}")
         }
     }
 
@@ -527,7 +694,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private fun hookFocusLossSpoof(lpparam: LoadPackageParam) {
         val pkg = lpparam.packageName
 
-        // 1. Drop View.dispatchWindowFocusChanged(false) before views/listeners see focus loss
         runCatching {
             XposedHelpers.findAndHookMethod(
                 View::class.java,
@@ -536,7 +702,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg) && param.args[0] == false) {
-                            recordStat(pkg, "focus")
+                            recordStat(pkg, "focus", "View.dispatchWindowFocusChanged(false)")
                             param.result = null
                         }
                     }
@@ -544,7 +710,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 2. Drop ViewTreeObserver.dispatchOnWindowFocusChange(false)
         runCatching {
             XposedBridge.hookAllMethods(
                 ViewTreeObserver::class.java,
@@ -559,7 +724,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 3. Intercept DecorView.onWindowFocusChanged(false)
         val decorViewClass = XposedHelpers.findClassIfExists(
             "com.android.internal.policy.DecorView",
             lpparam.classLoader
@@ -581,7 +745,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             }
         }
 
-        // 4. Intercept Activity.onWindowFocusChanged(false) & Activity.hasWindowFocus()
         runCatching {
             XposedHelpers.findAndHookMethod(
                 Activity::class.java,
@@ -590,7 +753,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg) && param.args[0] == false) {
-                            recordStat(pkg, "focus")
+                            recordStat(pkg, "focus", "Activity.onWindowFocusChanged(false)")
                             param.args[0] = true
                         }
                     }
@@ -602,6 +765,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg)) {
+                            recordStat(pkg, "focus", "Activity.hasWindowFocus()")
                             param.result = true
                         }
                     }
@@ -609,7 +773,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 5. Force View.hasWindowFocus() -> true
         runCatching {
             XposedHelpers.findAndHookMethod(
                 View::class.java,
@@ -624,7 +787,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 6. Android 10-16: suppress onTopResumedActivityChanged(false)
         runCatching {
             XposedBridge.hookAllMethods(
                 Activity::class.java,
@@ -632,7 +794,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg) && param.args.isNotEmpty() && param.args[0] == false) {
-                            recordStat(pkg, "focus")
+                            recordStat(pkg, "focus", "Activity.onTopResumedActivityChanged(false)")
                             log(pkg, "Suppressed performTopResumedActivityChanged(false)")
                             param.result = null
                         }
@@ -641,7 +803,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 7. Safe Recents/Home hint suppression (does NOT block Activity.onPause/onStop surfaces)
         runCatching {
             XposedBridge.hookAllMethods(
                 Activity::class.java,
@@ -649,7 +810,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg)) {
-                            recordStat(pkg, "focus")
+                            recordStat(pkg, "focus", "Activity.onUserLeaveHint()")
                             log(pkg, "Suppressed Activity.performUserLeaving() safely")
                             param.result = null
                         }
@@ -658,7 +819,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 8. Spoof ActivityManager.getMyMemoryState() so process importance stays IMPORTANCE_FOREGROUND
         runCatching {
             XposedHelpers.findAndHookMethod(
                 ActivityManager::class.java,
@@ -682,7 +842,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             lpparam.classLoader
         ) ?: return
 
-        // 1. Keep WebView window visibility reporting View.VISIBLE
         runCatching {
             XposedBridge.hookAllMethods(
                 webViewClass,
@@ -690,7 +849,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideWebView(pkg) && param.args.isNotEmpty() && param.args[0] != View.VISIBLE) {
-                            recordStat(pkg, "webview")
+                            recordStat(pkg, "webview", "WebView.onWindowVisibilityChanged()")
                             param.args[0] = View.VISIBLE
                         }
                     }
@@ -698,7 +857,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 2. Optionally block WebView.onPause() / pauseTimers() for stubborn players/timers
         runCatching {
             XposedBridge.hookAllMethods(
                 webViewClass,
@@ -706,7 +864,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideWebView(pkg)) {
-                            recordStat(pkg, "webview")
+                            recordStat(pkg, "webview", "WebView.onPause()")
                             log(pkg, "Suppressed WebView.onPause()")
                             param.result = null
                         }
@@ -719,7 +877,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 object : XC_MethodHook() {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideWebView(pkg)) {
-                            recordStat(pkg, "webview")
+                            recordStat(pkg, "webview", "WebView.pauseTimers()")
                             log(pkg, "Suppressed WebView.pauseTimers()")
                             param.result = null
                         }
@@ -728,7 +886,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // 3. Inject DOM Page Visibility & Fullscreen stealth JS on WebView page completion
         runCatching {
             XposedBridge.hookAllMethods(
                 WebViewClient::class.java,
@@ -794,7 +951,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
             webView.post {
                 runCatching {
                     webView.evaluateJavascript(WEBVIEW_STEALTH_JS, null)
-                    recordStat(pkg, "webview")
+                    recordStat(pkg, "webview", "WebView.evaluateJavascript(stealth)")
                 }
             }
         }
@@ -803,7 +960,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private fun hookLifecycleStealth(lpparam: LoadPackageParam) {
         val pkg = lpparam.packageName
 
-        // Suppress Application.ActivityLifecycleCallbacks paused/stopped dispatches
         runCatching {
             XposedBridge.hookAllMethods(
                 Application::class.java,
@@ -812,7 +968,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val act = param.args.firstOrNull() as? Activity
                         if (shouldHideLifecycle(pkg) && act?.isFinishing != true) {
-                            recordStat(pkg, "lifecycle")
+                            recordStat(pkg, "lifecycle", "Application.dispatchActivityPaused()")
                             param.result = null
                         }
                     }
@@ -825,7 +981,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         val act = param.args.firstOrNull() as? Activity
                         if (shouldHideLifecycle(pkg) && act?.isFinishing != true) {
-                            recordStat(pkg, "lifecycle")
+                            recordStat(pkg, "lifecycle", "Application.dispatchActivityStopped()")
                             param.result = null
                         }
                     }
@@ -833,7 +989,6 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        // Suppress Jetpack LifecycleRegistry ON_PAUSE / ON_STOP
         val lifecycleRegistryClass = XposedHelpers.findClassIfExists(
             "androidx.lifecycle.LifecycleRegistry",
             lpparam.classLoader
@@ -848,8 +1003,8 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             if (!shouldHideLifecycle(pkg)) return
                             val eventName = param.args.firstOrNull()?.toString() ?: return
                             if (eventName == "ON_PAUSE" || eventName == "ON_STOP") {
-                                recordStat(pkg, "lifecycle")
-                                log(pkg, "Suppressed LifecycleRegistry.handleLifecycleEvent($eventName)")
+                                recordStat(pkg, "lifecycle", "LifecycleRegistry(\$eventName)")
+                                log(pkg, "Suppressed LifecycleRegistry.handleLifecycleEvent(\$eventName)")
                                 param.result = null
                             }
                         }
@@ -868,6 +1023,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                 name.startsWith("com.android.") ||
                 name.startsWith("java.")
             if (!isFramework && hookedActivityClasses.add(name)) {
+                val simpleName = cls.simpleName
                 runCatching {
                     val onPause = cls.getDeclaredMethod("onPause")
                     XposedBridge.hookMethod(onPause, object : XC_MethodHook() {
@@ -875,8 +1031,8 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             val act = param.thisObject as? Activity ?: return
                             if (shouldHideLifecycle(pkg) && !act.isFinishing) {
                                 XposedHelpers.setBooleanField(act, "mCalled", true)
-                                recordStat(pkg, "lifecycle")
-                                log(pkg, "Suppressed $name.onPause()")
+                                recordStat(pkg, "lifecycle", "\$simpleName.onPause()")
+                                log(pkg, "Suppressed \$name.onPause()")
                                 param.result = null
                             }
                         }
@@ -889,8 +1045,8 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             val act = param.thisObject as? Activity ?: return
                             if (shouldHideLifecycle(pkg) && !act.isFinishing) {
                                 XposedHelpers.setBooleanField(act, "mCalled", true)
-                                recordStat(pkg, "lifecycle")
-                                log(pkg, "Suppressed $name.onStop()")
+                                recordStat(pkg, "lifecycle", "\$simpleName.onStop()")
+                                log(pkg, "Suppressed \$name.onStop()")
                                 param.result = null
                             }
                         }
@@ -901,8 +1057,8 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     XposedBridge.hookMethod(onUserLeaveHint, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (shouldHideFocus(pkg) || shouldHideLifecycle(pkg)) {
-                                recordStat(pkg, "focus")
-                                log(pkg, "Suppressed $name.onUserLeaveHint()")
+                                recordStat(pkg, "focus", "\$simpleName.onUserLeaveHint()")
+                                log(pkg, "Suppressed \$name.onUserLeaveHint()")
                                 param.result = null
                             }
                         }
@@ -916,8 +1072,8 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     XposedBridge.hookMethod(onFocusChanged, object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (shouldHideFocus(pkg) && param.args[0] == false) {
-                                recordStat(pkg, "focus")
-                                log(pkg, "Suppressed $name.onWindowFocusChanged(false)")
+                                recordStat(pkg, "focus", "\$simpleName.onWindowFocusChanged(false)")
+                                log(pkg, "Suppressed \$name.onWindowFocusChanged(false)")
                                 param.result = null
                             }
                         }
@@ -1036,6 +1192,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         ) {
                             param.args[0] = flags and WindowManager.LayoutParams.FLAG_SECURE.inv()
                             param.args[1] = mask and WindowManager.LayoutParams.FLAG_SECURE.inv()
+                            recordStat(pkg, "cloak", "Window.setFlags(FLAG_SECURE)")
                             log(pkg, "Stripped FLAG_SECURE from Window.setFlags()")
                         }
                     }
@@ -1049,6 +1206,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldStripFlagSecure(pkg) && param.args[0] == true) {
                             param.args[0] = false
+                            recordStat(pkg, "cloak", "SurfaceView.setSecure()")
                             log(pkg, "Stripped FLAG_SECURE from SurfaceView.setSecure()")
                         }
                     }
@@ -1068,6 +1226,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideAccessibility(pkg)) {
                             param.result = Collections.emptyList<Any>()
+                            recordStat(pkg, "cloak", "AccessibilityManager.getEnabledList()")
                             log(pkg, "AccessibilityManager.getEnabledAccessibilityServiceList() -> emptyList")
                         }
                     }
@@ -1083,6 +1242,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideAccessibility(pkg)) {
                             param.result = false
+                            recordStat(pkg, "cloak", "Settings.canDrawOverlays()")
                             log(pkg, "Settings.canDrawOverlays() -> false")
                         }
                     }
@@ -1107,7 +1267,8 @@ class PinSpoofModule : IXposedHookLoadPackage {
                                     if (!shouldRetainAudioFocus(pkg)) return
                                     val change = p.args[0] as? Int ?: return
                                     if (change < 0) {
-                                        log(pkg, "Suppressed audio focus loss ($change) on \${cls.simpleName}")
+                                        recordStat(pkg, "focus", "OnAudioFocusChange(\$change)")
+                                        log(pkg, "Suppressed audio focus loss (\$change) on \${cls.simpleName}")
                                         p.result = null
                                     }
                                 }
@@ -1132,7 +1293,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val builderClass = XposedHelpers.findClassIfExists(
-                "android.media.AudioFocusRequest\\$Builder",
+                "android.media.AudioFocusRequest\\\$Builder",
                 lpparam.classLoader
             )
             if (builderClass != null) {
@@ -1151,6 +1312,426 @@ class PinSpoofModule : IXposedHookLoadPackage {
         }
     }
 
+    private fun hookPackageAndInstallerCloaking(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        val appPmClass = XposedHelpers.findClassIfExists(
+            "android.app.ApplicationPackageManager",
+            lpparam.classLoader
+        ) ?: return
+
+        runCatching {
+            @Suppress("DEPRECATION")
+            XposedBridge.hookAllMethods(
+                appPmClass,
+                "getInstallerPackageName",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldCloakPackages(pkg)) return
+                        val queried = param.args.firstOrNull() as? String
+                        if (queried == pkg) {
+                            param.result = "com.android.vending"
+                            recordStat(pkg, "cloak", "PackageManager.getInstallerPackageName()")
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                appPmClass,
+                "getInstalledPackages",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldCloakPackages(pkg)) return
+                        val list = (param.result as? List<*>) ?: return
+                        val filtered = list.filter { item ->
+                            val p = (item as? PackageInfo)?.packageName
+                            p == null || p !in CLOAKED_PACKAGES
+                        }
+                        if (filtered.size != list.size) {
+                            param.result = filtered
+                            recordStat(pkg, "cloak", "PackageManager.getInstalledPackages()")
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                appPmClass,
+                "getInstalledApplications",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldCloakPackages(pkg)) return
+                        val list = (param.result as? List<*>) ?: return
+                        val filtered = list.filter { item ->
+                            val p = (item as? ApplicationInfo)?.packageName
+                            p == null || p !in CLOAKED_PACKAGES
+                        }
+                        if (filtered.size != list.size) {
+                            param.result = filtered
+                            recordStat(pkg, "cloak", "PackageManager.getInstalledApplications()")
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                appPmClass,
+                "queryIntentActivities",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldCloakPackages(pkg)) return
+                        val list = (param.result as? List<*>) ?: return
+                        val filtered = list.filter { item ->
+                            val p = (item as? ResolveInfo)?.activityInfo?.packageName
+                            p == null || p !in CLOAKED_PACKAGES
+                        }
+                        if (filtered.size != list.size) {
+                            param.result = filtered
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                appPmClass,
+                "getPackageInfo",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldCloakPackages(pkg)) return
+                        val queried = param.args.firstOrNull() as? String ?: return
+                        if (queried in CLOAKED_PACKAGES) {
+                            recordStat(pkg, "cloak", "PackageManager.getPackageInfo(hidden)")
+                            param.throwable = PackageManager.NameNotFoundException(queried)
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun hookStackTraceSanitization(pkg: String) {
+        val filterFrames = { frames: Array<StackTraceElement>? ->
+            if (frames == null) null
+            else frames.filter { el ->
+                val cls = el.className
+                STACK_FILTER_MARKERS.none { marker -> cls.contains(marker, ignoreCase = true) }
+            }.toTypedArray()
+        }
+
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                Thread::class.java,
+                "getStackTrace",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldSanitizeStackTraces(pkg) || inStackSanitize.get() == true) return
+                        inStackSanitize.set(true)
+                        try {
+                            @Suppress("UNCHECKED_CAST")
+                            val raw = param.result as? Array<StackTraceElement> ?: return
+                            val clean = filterFrames(raw) ?: return
+                            if (clean.size != raw.size) {
+                                param.result = clean
+                                recordStat(pkg, "cloak", "Thread.getStackTrace()")
+                            }
+                        } finally {
+                            inStackSanitize.set(false)
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                Throwable::class.java,
+                "getStackTrace",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldSanitizeStackTraces(pkg) || inStackSanitize.get() == true) return
+                        inStackSanitize.set(true)
+                        try {
+                            @Suppress("UNCHECKED_CAST")
+                            val raw = param.result as? Array<StackTraceElement> ?: return
+                            val clean = filterFrames(raw) ?: return
+                            if (clean.size != raw.size) {
+                                param.result = clean
+                                recordStat(pkg, "cloak", "Throwable.getStackTrace()")
+                            }
+                        } finally {
+                            inStackSanitize.set(false)
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun hookSensorSpoofing(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        runCatching {
+            XposedBridge.hookAllMethods(
+                SensorManager::class.java,
+                "registerListener",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val listener = param.args.firstOrNull { it is SensorEventListener } as? SensorEventListener
+                            ?: return
+                        val cls = listener.javaClass
+                        if (hookedSensorListeners.add(cls.name)) {
+                            runCatching {
+                                XposedHelpers.findAndHookMethod(
+                                    cls,
+                                    "onSensorChanged",
+                                    SensorEvent::class.java,
+                                    object : XC_MethodHook() {
+                                        override fun beforeHookedMethod(p: MethodHookParam) {
+                                            if (!shouldSpoofSensors(pkg)) return
+                                            val ev = p.args.firstOrNull() as? SensorEvent ?: return
+                                            val values = ev.values ?: return
+                                            when (ev.sensor?.type) {
+                                                Sensor.TYPE_ACCELEROMETER, Sensor.TYPE_GRAVITY -> {
+                                                    if (values.size >= 3) {
+                                                        values[0] = 0f
+                                                        values[1] = 0f
+                                                        values[2] = SensorManager.GRAVITY_EARTH
+                                                        recordStat(pkg, "cloak", "Sensor.Accelerometer")
+                                                    }
+                                                }
+                                                Sensor.TYPE_GYROSCOPE, Sensor.TYPE_LINEAR_ACCELERATION -> {
+                                                    if (values.size >= 3) {
+                                                        values[0] = 0f
+                                                        values[1] = 0f
+                                                        values[2] = 0f
+                                                        recordStat(pkg, "cloak", "Sensor.Gyroscope")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                SensorManager::class.java,
+                "requestTriggerSensor",
+                TriggerEventListener::class.java,
+                Sensor::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldSpoofSensors(pkg)) return
+                        val sensor = param.args[1] as? Sensor ?: return
+                        if (sensor.type == Sensor.TYPE_SIGNIFICANT_MOTION) {
+                            recordStat(pkg, "cloak", "Sensor.SignificantMotion")
+                            param.result = false
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun hookVirtualDisplayBypass(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        runCatching {
+            XposedBridge.hookAllMethods(
+                DisplayManager::class.java,
+                "getDisplays",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldBypassVirtualDisplays(pkg)) return
+                        @Suppress("UNCHECKED_CAST")
+                        val displays = param.result as? Array<Display> ?: return
+                        if (displays.size > 1) {
+                            val primary = displays.firstOrNull { it.displayId == Display.DEFAULT_DISPLAY }
+                                ?: displays.first()
+                            param.result = arrayOf(primary)
+                            recordStat(pkg, "cloak", "DisplayManager.getDisplays()")
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                DisplayManager::class.java,
+                "getDisplay",
+                Int::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldBypassVirtualDisplays(pkg)) return
+                        val id = param.args[0] as? Int ?: return
+                        if (id != Display.DEFAULT_DISPLAY) {
+                            recordStat(pkg, "cloak", "DisplayManager.getDisplay(\$id)")
+                            param.result = null
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                DisplayManager::class.java,
+                "registerDisplayListener",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        val listener = param.args.firstOrNull { it is DisplayManager.DisplayListener }
+                            as? DisplayManager.DisplayListener ?: return
+                        val cls = listener.javaClass
+                        if (hookedDisplayListeners.add(cls.name)) {
+                            listOf("onDisplayAdded", "onDisplayChanged", "onDisplayRemoved").forEach { mName ->
+                                runCatching {
+                                    XposedHelpers.findAndHookMethod(
+                                        cls,
+                                        mName,
+                                        Int::class.javaPrimitiveType,
+                                        object : XC_MethodHook() {
+                                            override fun beforeHookedMethod(p: MethodHookParam) {
+                                                if (!shouldBypassVirtualDisplays(pkg)) return
+                                                val id = p.args[0] as? Int ?: return
+                                                if (id != Display.DEFAULT_DISPLAY) {
+                                                    recordStat(pkg, "cloak", "DisplayListener.\$mName()")
+                                                    p.result = null
+                                                }
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun hookClipboardBypass(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                XposedHelpers.findAndHookMethod(
+                    ClipboardManager::class.java,
+                    "clearPrimaryClip",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldUnblockClipboard(pkg)) {
+                                recordStat(pkg, "cloak", "ClipboardManager.clearPrimaryClip()")
+                                log(pkg, "Blocked ClipboardManager.clearPrimaryClip()")
+                                param.result = null
+                            }
+                        }
+                    }
+                )
+            }
+            XposedHelpers.findAndHookMethod(
+                ClipboardManager::class.java,
+                "setPrimaryClip",
+                ClipData::class.java,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (!shouldUnblockClipboard(pkg)) return
+                        val clip = param.args[0] as? ClipData
+                        val isEmptyClear = clip == null ||
+                            clip.itemCount == 0 ||
+                            (clip.itemCount == 1 && clip.getItemAt(0)?.text?.isBlank() == true)
+                        if (isEmptyClear) {
+                            recordStat(pkg, "cloak", "ClipboardManager.setPrimaryClip(empty)")
+                            log(pkg, "Blocked blank ClipboardManager.setPrimaryClip() wipe")
+                            param.result = null
+                        }
+                    }
+                }
+            )
+        }
+    }
+
+    private fun hookPackageSignatureSpoof(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        val buildSpoofSig = {
+            val hex = readString(pkg, "spoof_signature_hex", HookConfig.SPOOF_SIGNATURE_HEX)
+                .replace(":", "")
+                .replace(" ", "")
+                .trim()
+            if (hex.isNotEmpty() && hex.length >= 128) {
+                runCatching { Signature(hex) }.getOrNull()
+            } else {
+                null
+            }
+        }
+
+        val appPmClass = XposedHelpers.findClassIfExists(
+            "android.app.ApplicationPackageManager",
+            lpparam.classLoader
+        )
+        if (appPmClass != null) {
+            runCatching {
+                @Suppress("DEPRECATION")
+                XposedBridge.hookAllMethods(
+                    appPmClass,
+                    "getPackageInfo",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!shouldSpoofSignature(pkg)) return
+                            val queriedPkg = param.args.firstOrNull() as? String ?: return
+                            if (queriedPkg != pkg) return
+                            val info = param.result as? PackageInfo ?: return
+                            val sig = buildSpoofSig() ?: return
+                            info.signatures = arrayOf(sig)
+                            recordStat(pkg, "cloak", "PackageInfo.signatures")
+                        }
+                    }
+                )
+            }
+        }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val signingInfoClass = XposedHelpers.findClassIfExists(
+                "android.content.pm.SigningInfo",
+                lpparam.classLoader
+            )
+            if (signingInfoClass != null) {
+                runCatching {
+                    listOf("getApkContentsSigners", "getSigningCertificateHistory").forEach { mName ->
+                        XposedBridge.hookAllMethods(
+                            signingInfoClass,
+                            mName,
+                            object : XC_MethodHook() {
+                                override fun afterHookedMethod(param: MethodHookParam) {
+                                    if (!shouldSpoofSignature(pkg)) return
+                                    val sig = buildSpoofSig() ?: return
+                                    param.result = arrayOf(sig)
+                                    recordStat(pkg, "cloak", "SigningInfo.\$mName()")
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun hookIntegritySoftFail(lpparam: LoadPackageParam) {
+        val pkg = lpparam.packageName
+        val taskClass = XposedHelpers.findClassIfExists(
+            "com.google.android.gms.tasks.Task",
+            lpparam.classLoader
+        )
+        if (taskClass != null) {
+            runCatching {
+                XposedBridge.hookAllMethods(
+                    taskClass,
+                    "getException",
+                    object : XC_MethodHook() {
+                        override fun afterHookedMethod(param: MethodHookParam) {
+                            if (!shouldSoftFailIntegrity(pkg)) return
+                            val ex = param.result as? Throwable ?: return
+                            val msg = "\${ex.javaClass.name} \${ex.message}"
+                            if (msg.contains("Integrity", ignoreCase = true) ||
+                                msg.contains("SafetyNet", ignoreCase = true) ||
+                                msg.contains("attest", ignoreCase = true)
+                            ) {
+                                recordStat(pkg, "cloak", "PlayIntegrity.softFail")
+                                param.result = null
+                            }
+                        }
+                    }
+                )
+            }
+        }
+    }
+
     private fun hookSettingsLockToApp(lpparam: LoadPackageParam) {
         val pkg = lpparam.packageName
         runCatching {
@@ -1164,6 +1745,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (param.args[1] == "lock_to_app_enabled") {
                             param.result = 1
+                            recordStat(pkg, "pin", "Settings.System.lock_to_app")
                             log(pkg, "Settings.System[lock_to_app_enabled] -> 1")
                         }
                     }
@@ -1198,7 +1780,8 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (param.args[0] == pkg) {
                             param.result = true
-                            log(pkg, "DevicePolicyManager.isLockTaskPermitted($pkg) -> true")
+                            recordStat(pkg, "pin", "DevicePolicyManager.isLockTaskPermitted()")
+                            log(pkg, "DevicePolicyManager.isLockTaskPermitted(\$pkg) -> true")
                         }
                     }
                 }
@@ -1209,6 +1792,23 @@ class PinSpoofModule : IXposedHookLoadPackage {
     }
 
     companion object {
+        private val CLOAKED_PACKAGES = setOf(
+            "de.robv.android.xposed.installer",
+            "org.lsposed.manager",
+            "io.github.lsposed.manager",
+            "app.morphe.manager",
+            "com.topjohnwu.magisk",
+            "us.redcatx.pinspoof"
+        )
+
+        private val STACK_FILTER_MARKERS = listOf(
+            "de.robv.android.xposed",
+            "LSPHooker",
+            "EdHooker",
+            "me.weishu.epic",
+            "us.redcatx.pinspoof"
+        )
+
         private const val WEBVIEW_STEALTH_JS = """
             (function() {
               if (window.__pinspoofStealthApplied) return;
@@ -1310,13 +1910,14 @@ function generatePrefsManagerKt(pkg: string): string {
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.SharedPreferences
+import org.json.JSONArray
 import org.json.JSONObject
 import ${pkg}.HookConfig
 
 enum class HookPreset(val label: String, val summary: String) {
     LIGHT("Light", "Pinning bypass & state spoof only"),
     BALANCED("Balanced", "Safe defaults: pinning + focus + multi-window"),
-    AGGRESSIVE("Aggressive", "All stealth, WebView JS, lifecycle & UI hooks")
+    AGGRESSIVE("Aggressive", "All stealth, anti-detection, display & UI hooks")
 }
 
 data class GranularHookState(
@@ -1330,6 +1931,14 @@ data class GranularHookState(
     val stripFlagSecure: Boolean = HookConfig.STRIP_FLAG_SECURE,
     val hideAccessibilityOverlays: Boolean = HookConfig.HIDE_ACCESSIBILITY_OVERLAYS,
     val retainAudioFocus: Boolean = HookConfig.RETAIN_AUDIO_FOCUS,
+    val cloakPackagesInstaller: Boolean = HookConfig.CLOAK_PACKAGES_INSTALLER,
+    val sanitizeStackTraces: Boolean = HookConfig.SANITIZE_STACK_TRACES,
+    val spoofMotionSensors: Boolean = HookConfig.SPOOF_MOTION_SENSORS,
+    val bypassVirtualDisplays: Boolean = HookConfig.BYPASS_VIRTUAL_DISPLAYS,
+    val unblockClipboard: Boolean = HookConfig.UNBLOCK_CLIPBOARD,
+    val spoofPackageSignature: Boolean = HookConfig.SPOOF_PACKAGE_SIGNATURE,
+    val spoofSignatureHex: String = HookConfig.SPOOF_SIGNATURE_HEX,
+    val softFailIntegrity: Boolean = HookConfig.SOFT_FAIL_INTEGRITY,
     val hookActivityLockTask: Boolean = HookConfig.HOOK_ACTIVITY_LOCK_TASK,
     val hookActivityManagerState: Boolean = HookConfig.HOOK_ACTIVITY_MANAGER_STATE,
     val hookBinderProxies: Boolean = HookConfig.HOOK_BINDER_PROXIES,
@@ -1350,6 +1959,13 @@ data class GranularHookState(
             stripFlagSecure = false,
             hideAccessibilityOverlays = false,
             retainAudioFocus = false,
+            cloakPackagesInstaller = false,
+            sanitizeStackTraces = false,
+            spoofMotionSensors = false,
+            bypassVirtualDisplays = false,
+            unblockClipboard = false,
+            spoofPackageSignature = false,
+            softFailIntegrity = false,
             hookActivityLockTask = true,
             hookActivityManagerState = true,
             hookBinderProxies = false,
@@ -1368,6 +1984,13 @@ data class GranularHookState(
             stripFlagSecure = false,
             hideAccessibilityOverlays = false,
             retainAudioFocus = false,
+            cloakPackagesInstaller = false,
+            sanitizeStackTraces = false,
+            spoofMotionSensors = false,
+            bypassVirtualDisplays = false,
+            unblockClipboard = false,
+            spoofPackageSignature = false,
+            softFailIntegrity = false,
             hookActivityLockTask = true,
             hookActivityManagerState = true,
             hookBinderProxies = false,
@@ -1386,6 +2009,13 @@ data class GranularHookState(
             stripFlagSecure = true,
             hideAccessibilityOverlays = true,
             retainAudioFocus = true,
+            cloakPackagesInstaller = true,
+            sanitizeStackTraces = true,
+            spoofMotionSensors = true,
+            bypassVirtualDisplays = true,
+            unblockClipboard = true,
+            spoofPackageSignature = true,
+            softFailIntegrity = true,
             hookActivityLockTask = true,
             hookActivityManagerState = true,
             hookBinderProxies = true,
@@ -1395,8 +2025,11 @@ data class GranularHookState(
         )
     }
 
+    fun matchingPreset(): HookPreset? =
+        HookPreset.entries.firstOrNull { this == this.withPreset(it) }
+
     fun toJson(targetPackage: String?): String = JSONObject().apply {
-        put("schemaVersion", 2)
+        put("schemaVersion", 3)
         put("targetPackage", targetPackage ?: "global")
         put("masterEnabled", masterEnabled)
         put("alwaysSpoofPinned", alwaysSpoofPinned)
@@ -1408,6 +2041,14 @@ data class GranularHookState(
         put("stripFlagSecure", stripFlagSecure)
         put("hideAccessibilityOverlays", hideAccessibilityOverlays)
         put("retainAudioFocus", retainAudioFocus)
+        put("cloakPackagesInstaller", cloakPackagesInstaller)
+        put("sanitizeStackTraces", sanitizeStackTraces)
+        put("spoofMotionSensors", spoofMotionSensors)
+        put("bypassVirtualDisplays", bypassVirtualDisplays)
+        put("unblockClipboard", unblockClipboard)
+        put("spoofPackageSignature", spoofPackageSignature)
+        put("spoofSignatureHex", spoofSignatureHex)
+        put("softFailIntegrity", softFailIntegrity)
         put("hookActivityLockTask", hookActivityLockTask)
         put("hookActivityManagerState", hookActivityManagerState)
         put("hookBinderProxies", hookBinderProxies)
@@ -1431,6 +2072,14 @@ data class GranularHookState(
                 stripFlagSecure = obj.optBoolean("stripFlagSecure", base.stripFlagSecure),
                 hideAccessibilityOverlays = obj.optBoolean("hideAccessibilityOverlays", base.hideAccessibilityOverlays),
                 retainAudioFocus = obj.optBoolean("retainAudioFocus", base.retainAudioFocus),
+                cloakPackagesInstaller = obj.optBoolean("cloakPackagesInstaller", base.cloakPackagesInstaller),
+                sanitizeStackTraces = obj.optBoolean("sanitizeStackTraces", base.sanitizeStackTraces),
+                spoofMotionSensors = obj.optBoolean("spoofMotionSensors", base.spoofMotionSensors),
+                bypassVirtualDisplays = obj.optBoolean("bypassVirtualDisplays", base.bypassVirtualDisplays),
+                unblockClipboard = obj.optBoolean("unblockClipboard", base.unblockClipboard),
+                spoofPackageSignature = obj.optBoolean("spoofPackageSignature", base.spoofPackageSignature),
+                spoofSignatureHex = obj.optString("spoofSignatureHex", base.spoofSignatureHex),
+                softFailIntegrity = obj.optBoolean("softFailIntegrity", base.softFailIntegrity),
                 hookActivityLockTask = obj.optBoolean("hookActivityLockTask", base.hookActivityLockTask),
                 hookActivityManagerState = obj.optBoolean("hookActivityManagerState", base.hookActivityManagerState),
                 hookBinderProxies = obj.optBoolean("hookBinderProxies", base.hookBinderProxies),
@@ -1448,10 +2097,19 @@ data class HookStats(
     val focusHidden: Long = 0L,
     val lifecycleHidden: Long = 0L,
     val webviewSpoofed: Long = 0L,
+    val cloakBypassed: Long = 0L,
     val lastUpdatedMs: Long = 0L
 ) {
-    val total: Long get() = pinBlocked + focusHidden + lifecycleHidden + webviewSpoofed
+    val total: Long get() = pinBlocked + focusHidden + lifecycleHidden + webviewSpoofed + cloakBypassed
 }
+
+data class HookLogEntry(
+    val pkg: String,
+    val category: String,
+    val method: String,
+    val count: Long,
+    val timestampMs: Long
+)
 
 class PrefsManager(context: Context) {
 
@@ -1489,7 +2147,7 @@ class PrefsManager(context: Context) {
 
     fun loadState(targetPackage: String?): GranularHookState {
         val prefix = if (targetPackage != null && hasPerAppOverride(targetPackage)) {
-            "$targetPackage::"
+            "\$targetPackage::"
         } else {
             "global::"
         }
@@ -1532,6 +2190,38 @@ class PrefsManager(context: Context) {
                 "\${prefix}retain_audio_focus",
                 g?.retainAudioFocus ?: HookConfig.RETAIN_AUDIO_FOCUS
             ),
+            cloakPackagesInstaller = prefs.getBoolean(
+                "\${prefix}cloak_packages_installer",
+                g?.cloakPackagesInstaller ?: HookConfig.CLOAK_PACKAGES_INSTALLER
+            ),
+            sanitizeStackTraces = prefs.getBoolean(
+                "\${prefix}sanitize_stack_traces",
+                g?.sanitizeStackTraces ?: HookConfig.SANITIZE_STACK_TRACES
+            ),
+            spoofMotionSensors = prefs.getBoolean(
+                "\${prefix}spoof_motion_sensors",
+                g?.spoofMotionSensors ?: HookConfig.SPOOF_MOTION_SENSORS
+            ),
+            bypassVirtualDisplays = prefs.getBoolean(
+                "\${prefix}bypass_virtual_displays",
+                g?.bypassVirtualDisplays ?: HookConfig.BYPASS_VIRTUAL_DISPLAYS
+            ),
+            unblockClipboard = prefs.getBoolean(
+                "\${prefix}unblock_clipboard",
+                g?.unblockClipboard ?: HookConfig.UNBLOCK_CLIPBOARD
+            ),
+            spoofPackageSignature = prefs.getBoolean(
+                "\${prefix}spoof_package_signature",
+                g?.spoofPackageSignature ?: HookConfig.SPOOF_PACKAGE_SIGNATURE
+            ),
+            spoofSignatureHex = prefs.getString(
+                "\${prefix}spoof_signature_hex",
+                g?.spoofSignatureHex ?: HookConfig.SPOOF_SIGNATURE_HEX
+            ) ?: HookConfig.SPOOF_SIGNATURE_HEX,
+            softFailIntegrity = prefs.getBoolean(
+                "\${prefix}soft_fail_integrity",
+                g?.softFailIntegrity ?: HookConfig.SOFT_FAIL_INTEGRITY
+            ),
             hookActivityLockTask = prefs.getBoolean(
                 "\${prefix}hook_activity_lock_task",
                 g?.hookActivityLockTask ?: HookConfig.HOOK_ACTIVITY_LOCK_TASK
@@ -1564,7 +2254,7 @@ class PrefsManager(context: Context) {
     }
 
     fun saveState(targetPackage: String?, state: GranularHookState) {
-        val prefix = if (targetPackage != null) "$targetPackage::" else "global::"
+        val prefix = if (targetPackage != null) "\$targetPackage::" else "global::"
         prefs.edit().apply {
             if (targetPackage != null) {
                 putBoolean("\${targetPackage}::override", true)
@@ -1579,6 +2269,14 @@ class PrefsManager(context: Context) {
             putBoolean("\${prefix}strip_flag_secure", state.stripFlagSecure)
             putBoolean("\${prefix}hide_accessibility_overlays", state.hideAccessibilityOverlays)
             putBoolean("\${prefix}retain_audio_focus", state.retainAudioFocus)
+            putBoolean("\${prefix}cloak_packages_installer", state.cloakPackagesInstaller)
+            putBoolean("\${prefix}sanitize_stack_traces", state.sanitizeStackTraces)
+            putBoolean("\${prefix}spoof_motion_sensors", state.spoofMotionSensors)
+            putBoolean("\${prefix}bypass_virtual_displays", state.bypassVirtualDisplays)
+            putBoolean("\${prefix}unblock_clipboard", state.unblockClipboard)
+            putBoolean("\${prefix}spoof_package_signature", state.spoofPackageSignature)
+            putString("\${prefix}spoof_signature_hex", state.spoofSignatureHex.trim())
+            putBoolean("\${prefix}soft_fail_integrity", state.softFailIntegrity)
             putBoolean("\${prefix}hook_activity_lock_task", state.hookActivityLockTask)
             putBoolean("\${prefix}hook_activity_manager_state", state.hookActivityManagerState)
             putBoolean("\${prefix}hook_binder_proxies", state.hookBinderProxies)
@@ -1592,12 +2290,34 @@ class PrefsManager(context: Context) {
     fun loadStats(targetPackage: String?): HookStats {
         val key = targetPackage ?: "__all__"
         return HookStats(
-            pinBlocked = statsPrefs.getLong("$key::pin", 0L),
-            focusHidden = statsPrefs.getLong("$key::focus", 0L),
-            lifecycleHidden = statsPrefs.getLong("$key::lifecycle", 0L),
-            webviewSpoofed = statsPrefs.getLong("$key::webview", 0L),
-            lastUpdatedMs = statsPrefs.getLong("$key::ts", 0L)
+            pinBlocked = statsPrefs.getLong("\$key::pin", 0L),
+            focusHidden = statsPrefs.getLong("\$key::focus", 0L),
+            lifecycleHidden = statsPrefs.getLong("\$key::lifecycle", 0L),
+            webviewSpoofed = statsPrefs.getLong("\$key::webview", 0L),
+            cloakBypassed = statsPrefs.getLong("\$key::cloak", 0L),
+            lastUpdatedMs = statsPrefs.getLong("\$key::ts", 0L)
         )
+    }
+
+    fun loadEventLog(targetPackage: String?): List<HookLogEntry> {
+        val raw = statsPrefs.getString("events_log", "[]") ?: "[]"
+        val arr = runCatching { JSONArray(raw) }.getOrElse { return emptyList() }
+        val result = mutableListOf<HookLogEntry>()
+        for (i in 0 until arr.length()) {
+            val obj = arr.optJSONObject(i) ?: continue
+            val pkg = obj.optString("pkg")
+            if (targetPackage != null && pkg != targetPackage) continue
+            result.add(
+                HookLogEntry(
+                    pkg = pkg,
+                    category = obj.optString("category"),
+                    method = obj.optString("method"),
+                    count = obj.optLong("count", 0L),
+                    timestampMs = obj.optLong("ts", 0L)
+                )
+            )
+        }
+        return result
     }
 
     fun resetStats(targetPackage: String?) {
@@ -1605,11 +2325,23 @@ class PrefsManager(context: Context) {
             if (targetPackage == null) {
                 clear()
             } else {
-                remove("$targetPackage::pin")
-                remove("$targetPackage::focus")
-                remove("$targetPackage::lifecycle")
-                remove("$targetPackage::webview")
-                remove("$targetPackage::ts")
+                remove("\$targetPackage::pin")
+                remove("\$targetPackage::focus")
+                remove("\$targetPackage::lifecycle")
+                remove("\$targetPackage::webview")
+                remove("\$targetPackage::cloak")
+                remove("\$targetPackage::ts")
+                val filtered = JSONArray()
+                val arr = runCatching {
+                    JSONArray(statsPrefs.getString("events_log", "[]") ?: "[]")
+                }.getOrElse { JSONArray() }
+                for (i in 0 until arr.length()) {
+                    val obj = arr.optJSONObject(i) ?: continue
+                    if (obj.optString("pkg") != targetPackage) {
+                        filtered.put(obj)
+                    }
+                }
+                putString("events_log", filtered.toString())
             }
         }.apply()
     }
@@ -1642,11 +2374,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -1664,25 +2399,36 @@ import androidx.compose.material.icons.rounded.Analytics
 import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.AspectRatio
+import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.LayersClear
 import androidx.compose.material.icons.rounded.PauseCircleOutline
 import androidx.compose.material.icons.rounded.PhonelinkLock
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.ScreenRotation
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Upload
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -1707,6 +2453,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -1725,10 +2472,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import java.text.DateFormat
+import java.util.Date
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ${pkg}.prefs.GranularHookState
+import ${pkg}.prefs.HookLogEntry
 import ${pkg}.prefs.HookPreset
 import ${pkg}.prefs.HookStats
 import ${pkg}.prefs.PrefsManager
@@ -1810,10 +2563,15 @@ private fun AppIconView(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    ExperimentalMaterial3ExpressiveApi::class,
+    ExperimentalLayoutApi::class
+)
 @Composable
 private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -1825,14 +2583,28 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         mutableStateOf(selectedPkg?.let { prefsManager.hasPerAppOverride(it) } ?: false)
     }
     var stats by remember(selectedPkg) { mutableStateOf(prefsManager.loadStats(selectedPkg)) }
+    var eventLog by remember(selectedPkg) { mutableStateOf(prefsManager.loadEventLog(selectedPkg)) }
     var showAppPicker by remember { mutableStateOf(false) }
+    var showEventLogSheet by remember { mutableStateOf(false) }
+    var eventLogFilter by remember { mutableStateOf("all") }
 
-    DisposableEffect(prefsManager, selectedPkg) {
+    DisposableEffect(prefsManager, selectedPkg, lifecycleOwner) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
             stats = prefsManager.loadStats(selectedPkg)
+            eventLog = prefsManager.loadEventLog(selectedPkg)
+        }
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                stats = prefsManager.loadStats(selectedPkg)
+                eventLog = prefsManager.loadEventLog(selectedPkg)
+            }
         }
         prefsManager.registerStatsListener(listener)
-        onDispose { prefsManager.unregisterStatsListener(listener) }
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+        onDispose {
+            prefsManager.unregisterStatsListener(listener)
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+        }
     }
 
     fun updateState(transform: (GranularHookState) -> GranularHookState) {
@@ -1885,7 +2657,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 title = {
                     Column {
                         Text(
-                            text = "\${HookConfig.MODULE_TAG} v${config.versionName}",
+                            text = HookConfig.MODULE_TAG,
                             style = MaterialTheme.typography.headlineMediumEmphasized,
                             fontWeight = FontWeight.Bold
                         )
@@ -1914,12 +2686,12 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
             ),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Expressive Scope Selector Card + JSON Export/Import
+            // Material You Cohesive Scope Selector Card + JSON Export/Import
             item {
                 ElevatedCard(
                     shape = RoundedCornerShape(28.dp),
                     colors = CardDefaults.elevatedCardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
                     )
                 ) {
                     Column(
@@ -1944,13 +2716,13 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                     modifier = Modifier
                                         .size(44.dp)
                                         .clip(RoundedCornerShape(14.dp))
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                                        .background(MaterialTheme.colorScheme.secondaryContainer),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.Apps,
                                         contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer
                                     )
                                 }
                             }
@@ -1981,7 +2753,11 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         ) {
                             FilledTonalButton(
                                 onClick = { showAppPicker = true },
-                                shape = RoundedCornerShape(16.dp)
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.Tune,
@@ -1995,7 +2771,6 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             if (selectedPkg != null) {
                                 TextButton(
                                     onClick = {
-                                        selectedPkg?.let { prefsManager.setPerAppOverride(it, false) }
                                         selectedPkg = null
                                         selectedLabel = "Global Defaults"
                                     }
@@ -2007,14 +2782,18 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             OutlinedButton(
                                 onClick = {
                                     val base = selectedPkg ?: "global"
-                                    exportLauncher.launch("pinspoof-$base.json")
+                                    exportLauncher.launch("pinspoof-\$base.json")
                                 },
-                                shape = RoundedCornerShape(14.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onSurface
+                                ),
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Rounded.Upload, null, modifier = Modifier.size(16.dp))
@@ -2023,7 +2802,11 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             }
                             OutlinedButton(
                                 onClick = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
-                                shape = RoundedCornerShape(14.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onSurface
+                                ),
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Rounded.Download, null, modifier = Modifier.size(16.dp))
@@ -2039,7 +2822,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
-                                    text = "Custom override active for this app",
+                                    text = "Custom rule saved for this app",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -2059,7 +2842,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
             }
 
-            // Live Hook Event Counter Card
+            // Live Hook Event Counter Card (tappable tiles open Live Hook Event Log drawer)
             item {
                 ElevatedCard(shape = RoundedCornerShape(28.dp)) {
                     Column(
@@ -2071,40 +2854,48 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Analytics,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary
+                            Icon(
+                                imageVector = Icons.Rounded.Analytics,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Live Hook Event Counter",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                Column {
-                                    Text(
-                                        text = "Live Hook Event Counter",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    Text(
-                                        text = if (selectedPkg == null) "All scoped apps combined" else selectedLabel,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
+                                Text(
+                                    text = if (selectedPkg == null) {
+                                        "Tap a tile to inspect triggered hooks · \${stats.cloakBypassed} cloak events"
+                                    } else {
+                                        "\$selectedLabel · Tap a tile for method log"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
-                            Row {
-                                IconButton(onClick = { stats = prefsManager.loadStats(selectedPkg) }) {
-                                    Icon(Icons.Rounded.Refresh, contentDescription = "Refresh counts")
-                                }
-                                TextButton(onClick = {
+                            IconButton(
+                                onClick = {
                                     prefsManager.resetStats(selectedPkg)
                                     stats = HookStats()
-                                }) {
-                                    Text("Reset")
+                                    eventLog = prefsManager.loadEventLog(selectedPkg)
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar("Reset event counters")
+                                    }
                                 }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = "Reset event counters",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
 
@@ -2112,10 +2903,42 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            StatTile("Pinning", stats.pinBlocked, Modifier.weight(1f))
-                            StatTile("Focus", stats.focusHidden, Modifier.weight(1f))
-                            StatTile("WebView", stats.webviewSpoofed, Modifier.weight(1f))
-                            StatTile("Lifecycle", stats.lifecycleHidden, Modifier.weight(1f))
+                            StatTile(
+                                label = "Pinning",
+                                count = stats.pinBlocked,
+                                onClick = {
+                                    eventLogFilter = "pin"
+                                    showEventLogSheet = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            StatTile(
+                                label = "Focus",
+                                count = stats.focusHidden,
+                                onClick = {
+                                    eventLogFilter = "focus"
+                                    showEventLogSheet = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            StatTile(
+                                label = "WebView",
+                                count = stats.webviewSpoofed,
+                                onClick = {
+                                    eventLogFilter = "webview"
+                                    showEventLogSheet = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            StatTile(
+                                label = "Lifecycle",
+                                count = stats.lifecycleHidden,
+                                onClick = {
+                                    eventLogFilter = "lifecycle"
+                                    showEventLogSheet = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
                         }
                     }
                 }
@@ -2241,7 +3064,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
             }
 
-            // Modern UI, Window Insets & Environment Stealth Card
+            // Expanded Display, Clipboard, Insets & Media Bypass Card
             item {
                 ElevatedCard(shape = RoundedCornerShape(28.dp)) {
                     Column(
@@ -2251,7 +3074,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         Text(
-                            text = "Window, Insets & Environment Stealth",
+                            text = "Display, Media & UI Bypass",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -2273,6 +3096,22 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         ExpressiveToggleRow(
+                            icon = Icons.Rounded.Cast,
+                            title = "Virtual Display & Casting Bypass",
+                            subtitle = "Expose only Display.DEFAULT_DISPLAY in DisplayManager and filter external display callbacks",
+                            checked = hookState.bypassVirtualDisplays,
+                            onCheckedChange = { v -> updateState { it.copy(bypassVirtualDisplays = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.ContentPaste,
+                            title = "Unblock Clipboard Clear",
+                            subtitle = "Suppress ClipboardManager.clearPrimaryClip() and blank clip wipes inside scoped apps",
+                            checked = hookState.unblockClipboard,
+                            onCheckedChange = { v -> updateState { it.copy(unblockClipboard = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
                             icon = Icons.Rounded.AccessibilityNew,
                             title = "Hide Accessibility & Overlay Checks",
                             subtitle = "Return empty AccessibilityManager service list and Settings.canDrawOverlays() = false",
@@ -2286,6 +3125,76 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             subtitle = "Suppress negative OnAudioFocusChangeListener events when notifications play",
                             checked = hookState.retainAudioFocus,
                             onCheckedChange = { v -> updateState { it.copy(retainAudioFocus = v) } }
+                        )
+                    }
+                }
+            }
+
+            // Deeper Anti-Detection, Sensors, Signature & Integrity Cloaking Card
+            item {
+                ElevatedCard(shape = RoundedCornerShape(28.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Text(
+                            text = "Anti-Detection & Integrity Cloaking",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.Security,
+                            title = "Cloak Packages & Play Installer",
+                            subtitle = "Report com.android.vending as installer and hide Xposed / LSPosed / Morphe packages",
+                            checked = hookState.cloakPackagesInstaller,
+                            onCheckedChange = { v -> updateState { it.copy(cloakPackagesInstaller = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.Code,
+                            title = "Sanitize Stack Traces",
+                            subtitle = "Strip Xposed, LSPHooker, EdHooker, and PinSpoof frames from Thread/Throwable stack traces",
+                            checked = hookState.sanitizeStackTraces,
+                            onCheckedChange = { v -> updateState { it.copy(sanitizeStackTraces = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.ScreenRotation,
+                            title = "Spoof Motion Sensors (Stationary)",
+                            subtitle = "Clamp accelerometer, gyroscope, and significant-motion sensors to resting desk readings",
+                            checked = hookState.spoofMotionSensors,
+                            onCheckedChange = { v -> updateState { it.copy(spoofMotionSensors = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.Fingerprint,
+                            title = "Spoof Package Signature",
+                            subtitle = "Return original signing certificate bytes on PackageInfo.signatures / SigningInfo queries",
+                            checked = hookState.spoofPackageSignature,
+                            onCheckedChange = { v -> updateState { it.copy(spoofPackageSignature = v) } }
+                        )
+                        AnimatedVisibility(visible = hookState.spoofPackageSignature) {
+                            OutlinedTextField(
+                                value = hookState.spoofSignatureHex,
+                                onValueChange = { hex -> updateState { it.copy(spoofSignatureHex = hex) } },
+                                label = { Text("Original Certificate DER Hex (optional)") },
+                                placeholder = { Text("3082...") },
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.VerifiedUser,
+                            title = "Play Integrity / SafetyNet Soft-Fail",
+                            subtitle = "Clear local Integrity / attestation Task exceptions to prevent hard client crashes",
+                            checked = hookState.softFailIntegrity,
+                            onCheckedChange = { v -> updateState { it.copy(softFailIntegrity = v) } }
                         )
                     }
                 }
@@ -2325,8 +3234,8 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             onCheckedChange = { v -> updateState { it.copy(hookActivityClient = v) } }
                         )
                         GranularSwitchItem(
-                            title = "Binder Stub\\$Proxy Interception (Advanced)",
-                            subtitle = "OFF by default: dynamic Stub\\$Proxy scan for apps calling Binder proxies directly",
+                            title = "Binder Stub\\\$Proxy Interception (Advanced)",
+                            subtitle = "OFF by default: dynamic Stub\\\$Proxy scan for apps calling Binder proxies directly",
                             checked = hookState.hookBinderProxies,
                             onCheckedChange = { v -> updateState { it.copy(hookBinderProxies = v) } }
                         )
@@ -2354,9 +3263,14 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         }
     }
 
+    // Inline Expandable App Rules + Per-App Presets Sheet
     if (showAppPicker) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         var query by remember { mutableStateOf("") }
+        var expandedPkg by remember { mutableStateOf<String?>(selectedPkg) }
+        val appStatesMap = remember { mutableStateMapOf<String, GranularHookState>() }
+        val overrideMap = remember { mutableStateMapOf<String, Boolean>() }
+
         val installedApps = remember {
             val pm = context.packageManager
             pm.getInstalledApplications(PackageManager.GET_META_DATA)
@@ -2367,41 +3281,50 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0
                 }
                 .map {
+                    val hasCustom = prefsManager.hasPerAppOverride(it.packageName)
+                    overrideMap[it.packageName] = hasCustom
                     InstalledAppItem(
                         label = pm.getApplicationLabel(it).toString(),
                         packageName = it.packageName,
-                        hasOverride = prefsManager.hasPerAppOverride(it.packageName)
+                        hasOverride = hasCustom
                     )
                 }
                 .sortedWith(compareByDescending<InstalledAppItem> { it.hasOverride }.thenBy { it.label })
                 .toList()
         }
 
-        val filtered = remember(query, installedApps) {
-            if (query.isBlank()) installedApps
+        val filtered = remember(query, installedApps, overrideMap.toMap()) {
+            val baseList = if (query.isBlank()) installedApps
             else installedApps.filter {
                 it.label.contains(query, ignoreCase = true) ||
                     it.packageName.contains(query, ignoreCase = true)
             }
+            baseList.sortedWith(
+                compareByDescending<InstalledAppItem> { overrideMap[it.packageName] == true }
+                    .thenBy { it.label }
+            )
         }
 
         ModalBottomSheet(
             onDismissRequest = { showAppPicker = false },
             sheetState = sheetState
         ) {
-            Column(
-                modifier = Modifier.fillMaxWidth()
-            ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 20.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
                         text = "Select App for Granular Override",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Tap any app to expand inline presets and save individual rules",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     OutlinedTextField(
                         value = query,
@@ -2424,70 +3347,219 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(420.dp),
+                        .height(460.dp),
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filtered, key = { it.packageName }) { app ->
+                        val isExpanded = expandedPkg == app.packageName
+                        val isCustom = overrideMap[app.packageName] == true
+                        val appState = appStatesMap.getOrPut(app.packageName) {
+                            prefsManager.loadState(app.packageName)
+                        }
+
+                        fun saveAppRule(next: GranularHookState) {
+                            appStatesMap[app.packageName] = next
+                            overrideMap[app.packageName] = true
+                            prefsManager.saveState(app.packageName, next)
+                            if (selectedPkg == app.packageName) {
+                                hookState = next
+                                hasOverride = true
+                            }
+                        }
+
                         Surface(
                             onClick = {
-                                selectedPkg = app.packageName
-                                selectedLabel = app.label
-                                showAppPicker = false
+                                expandedPkg = if (isExpanded) null else app.packageName
                             },
                             shape = RoundedCornerShape(20.dp),
-                            color = if (app.hasOverride) {
-                                MaterialTheme.colorScheme.secondaryContainer
+                            color = if (isCustom) {
+                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)
                             } else {
                                 MaterialTheme.colorScheme.surfaceContainerHigh
                             }
                         ) {
-                            Row(
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                    .padding(horizontal = 16.dp, vertical = 14.dp)
                             ) {
-                                AppIconView(
-                                    packageName = app.packageName,
-                                    contentDescription = app.label,
-                                    size = 44.dp
-                                )
-
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
-                                    Text(
-                                        text = app.label,
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                    AppIconView(
+                                        packageName = app.packageName,
+                                        contentDescription = app.label,
+                                        size = 44.dp
                                     )
-                                    Text(
-                                        text = app.packageName,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                                    ) {
+                                        Text(
+                                            text = app.label,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = app.packageName,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+
+                                    if (isCustom) {
+                                        val presetTag = appState.matchingPreset()?.label ?: "Custom"
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                        ) {
+                                            Text(
+                                                text = presetTag,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Icon(
+                                        imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                        contentDescription = if (isExpanded) "Collapse rules" else "Expand rules",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
 
-                                if (app.hasOverride) {
-                                    Surface(
-                                        shape = RoundedCornerShape(10.dp),
-                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                AnimatedVisibility(visible = isExpanded) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
-                                        Text(
-                                            text = "Custom",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                        HorizontalDivider(
+                                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
                                         )
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "Save Individual App Rule",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                                Text(
+                                                    text = if (isCustom) "Uses independent per-app profile" else "Currently inherits Global Defaults",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            ExpressiveSwitch(
+                                                checked = isCustom,
+                                                onCheckedChange = { enabled ->
+                                                    overrideMap[app.packageName] = enabled
+                                                    prefsManager.setPerAppOverride(app.packageName, enabled)
+                                                    val reloaded = prefsManager.loadState(if (enabled) app.packageName else null)
+                                                    appStatesMap[app.packageName] = reloaded
+                                                    if (enabled) {
+                                                        prefsManager.saveState(app.packageName, reloaded)
+                                                    }
+                                                    if (selectedPkg == app.packageName) {
+                                                        hasOverride = enabled
+                                                        hookState = reloaded
+                                                    }
+                                                }
+                                            )
+                                        }
+
+                                        Text(
+                                            text = "Per-App Preset Profile",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                                            HookPreset.entries.forEachIndexed { idx, preset ->
+                                                val presetSelected = isCustom && appState == appState.withPreset(preset)
+                                                SegmentedButton(
+                                                    selected = presetSelected,
+                                                    onClick = { saveAppRule(appState.withPreset(preset)) },
+                                                    shape = SegmentedButtonDefaults.itemShape(
+                                                        index = idx,
+                                                        count = HookPreset.entries.size
+                                                    )
+                                                ) {
+                                                    Text(preset.label, maxLines = 1)
+                                                }
+                                            }
+                                        }
+
+                                        InlineAppRuleSwitch(
+                                            title = "Disable Pinning & Spoof Pinned",
+                                            checked = appState.masterEnabled,
+                                            onCheckedChange = { v -> saveAppRule(appState.copy(masterEnabled = v)) }
+                                        )
+                                        InlineAppRuleSwitch(
+                                            title = "Window Focus Spoofing (Safe)",
+                                            checked = appState.hideFocusLoss,
+                                            onCheckedChange = { v -> saveAppRule(appState.copy(hideFocusLoss = v)) }
+                                        )
+                                        InlineAppRuleSwitch(
+                                            title = "WebView JS & Visibility Stealth",
+                                            checked = appState.hideWebViewVisibility,
+                                            onCheckedChange = { v -> saveAppRule(appState.copy(hideWebViewVisibility = v)) }
+                                        )
+                                        InlineAppRuleSwitch(
+                                            title = "Suppress onPause / onStop",
+                                            checked = appState.hideLifecycleLoss,
+                                            onCheckedChange = { v -> saveAppRule(appState.copy(hideLifecycleLoss = v)) }
+                                        )
+                                        InlineAppRuleSwitch(
+                                            title = "Strip FLAG_SECURE",
+                                            checked = appState.stripFlagSecure,
+                                            onCheckedChange = { v -> saveAppRule(appState.copy(stripFlagSecure = v)) }
+                                        )
+                                        InlineAppRuleSwitch(
+                                            title = "Cloak Packages & Stack Traces",
+                                            checked = appState.cloakPackagesInstaller || appState.sanitizeStackTraces,
+                                            onCheckedChange = { v ->
+                                                saveAppRule(
+                                                    appState.copy(
+                                                        cloakPackagesInstaller = v,
+                                                        sanitizeStackTraces = v
+                                                    )
+                                                )
+                                            }
+                                        )
+
+                                        FilledTonalButton(
+                                            onClick = {
+                                                if (!isCustom) {
+                                                    saveAppRule(appState)
+                                                }
+                                                selectedPkg = app.packageName
+                                                selectedLabel = app.label
+                                                hookState = prefsManager.loadState(app.packageName)
+                                                hasOverride = true
+                                                showAppPicker = false
+                                            },
+                                            shape = RoundedCornerShape(14.dp),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text("Open All Controls & JSON")
+                                        }
                                     }
                                 }
                             }
@@ -2498,21 +3570,125 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
             }
         }
     }
+
+    // Live Hook Event Log Drawer (opened by tapping any StatTile)
+    if (showEventLogSheet) {
+        val logSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val filterChips = listOf(
+            "all" to "All",
+            "pin" to "Pinning",
+            "focus" to "Focus",
+            "webview" to "WebView",
+            "lifecycle" to "Lifecycle",
+            "cloak" to "Cloaking"
+        )
+        val filteredEntries = remember(eventLog, eventLogFilter) {
+            if (eventLogFilter == "all") eventLog
+            else eventLog.filter { it.category == eventLogFilter }
+        }
+        val timeFmt = remember { DateFormat.getTimeInstance(DateFormat.MEDIUM) }
+
+        ModalBottomSheet(
+            onDismissRequest = { showEventLogSheet = false },
+            sheetState = logSheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Live Hook Event Log",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = selectedPkg ?: "All scoped apps",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            prefsManager.resetStats(selectedPkg)
+                            stats = HookStats()
+                            eventLog = prefsManager.loadEventLog(selectedPkg)
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = "Reset event log"
+                        )
+                    }
+                }
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    filterChips.forEach { (id, label) ->
+                        FilterChip(
+                            selected = eventLogFilter == id,
+                            onClick = { eventLogFilter = id },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+
+                if (filteredEntries.isEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "No hook events recorded for this filter yet. Launch a scoped target app and trigger pinning or focus transitions.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(360.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(filteredEntries) { entry ->
+                            EventLogRow(entry = entry, formattedTime = timeFmt.format(Date(entry.timestampMs)))
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+            }
+        }
+    }
 }
 
 @Composable
 private fun StatTile(
     label: String,
     count: Long,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
+        onClick = onClick,
         modifier = modifier,
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
@@ -2520,17 +3696,84 @@ private fun StatTile(
                 text = count.toString(),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.primary
+                fontFamily = FontFamily.Monospace
             )
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                maxLines = 1
             )
         }
+    }
+}
+
+@Composable
+private fun EventLogRow(entry: HookLogEntry, formattedTime: String) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = entry.method,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "\${entry.pkg} · \$formattedTime",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer
+            ) {
+                Text(
+                    text = "×\${entry.count}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineAppRuleSwitch(
+    title: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f)
+        )
+        ExpressiveSwitch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
@@ -2547,11 +3790,24 @@ private fun ExpressiveToggleRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(
+                    if (checked) MaterialTheme.colorScheme.secondaryContainer
+                    else MaterialTheme.colorScheme.surfaceContainerHighest
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (checked) MaterialTheme.colorScheme.onSecondaryContainer
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
+        }
         Column(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -3001,6 +4257,7 @@ jobs:
 function generateMorphePatchKt(config: ModuleConfig, pkg: string): string {
   const extPrefix = `L${pkg.replace(/\./g, '/')}/extension/`;
   const extClass = `${extPrefix}PinSpoofHooks;`;
+  const escapedSigHex = config.spoofSignatureHex.replace(/["\\]/g, '').trim();
   return `package ${pkg}.patches
 
 import app.morphe.patcher.Fingerprint
@@ -3066,7 +4323,7 @@ private val SURFACE_VIEW_BASE_TYPES = setOf(
 @Suppress("unused")
 val pinSpoofPatch = bytecodePatch(
     name = "${config.moduleName}",
-    description = "Disables app pinning (LockTask), spoofs pinned state, and hides focus/Recents loss directly in patched APKs without root or Xposed.",
+    description = "Disables app pinning (LockTask), spoofs pinned state, and applies focus, WebView, display, clipboard, sensor, and anti-detection patches directly in APKs without root or Xposed.",
     default = false,
 ) {
     val spoofTiming by stringOption(
@@ -3097,7 +4354,7 @@ val pinSpoofPatch = bytecodePatch(
     val hookBinderProxies by booleanOption(
         key = "hookBinderProxies",
         default = ${config.hookBinderProxies},
-        title = "Binder Stub\\$Proxy LockTask Interception (Advanced)",
+        title = "Binder Stub\\\$Proxy LockTask Interception (Advanced)",
         description = "OFF by default: rewrite internal IActivityTaskManager/IActivityManager LockTask IPC calls directly.",
     )
 
@@ -3143,6 +4400,20 @@ val pinSpoofPatch = bytecodePatch(
         description = "Clear FLAG_SECURE on Windows and SurfaceViews so screenshots and recordings remain available.",
     )
 
+    val bypassVirtualDisplays by booleanOption(
+        key = "bypassVirtualDisplays",
+        default = ${config.bypassVirtualDisplays},
+        title = "Virtual Display & Screen Sharing Bypass",
+        description = "Expose only Display.DEFAULT_DISPLAY in DisplayManager and filter secondary display listener callbacks.",
+    )
+
+    val unblockClipboard by booleanOption(
+        key = "unblockClipboard",
+        default = ${config.unblockClipboard},
+        title = "Unblock Clipboard Clear",
+        description = "Prevent ClipboardManager.clearPrimaryClip() and empty clip wipes during copy/paste.",
+    )
+
     val hideAccessibilityAndOverlays by booleanOption(
         key = "hideAccessibilityAndOverlays",
         default = ${config.hideAccessibilityAndOverlays},
@@ -3155,6 +4426,48 @@ val pinSpoofPatch = bytecodePatch(
         default = ${config.retainAudioFocus},
         title = "Retain Audio Focus",
         description = "Suppress negative AudioManager.OnAudioFocusChangeListener notifications when interruptions occur.",
+    )
+
+    val cloakPackagesAndInstaller by booleanOption(
+        key = "cloakPackagesAndInstaller",
+        default = ${config.cloakPackagesAndInstaller},
+        title = "Cloak Packages & Play Store Installer",
+        description = "Report com.android.vending as installer and hide Xposed/LSPosed/Morphe packages from PackageManager.",
+    )
+
+    val sanitizeStackTraces by booleanOption(
+        key = "sanitizeStackTraces",
+        default = ${config.sanitizeStackTraces},
+        title = "Sanitize Stack Traces",
+        description = "Filter Xposed, LSPHooker, EdHooker, and PinSpoof frames from Thread/Throwable.getStackTrace().",
+    )
+
+    val spoofMotionSensors by booleanOption(
+        key = "spoofMotionSensors",
+        default = ${config.spoofMotionSensors},
+        title = "Spoof Motion Sensors (Stationary)",
+        description = "Clamp accelerometer, gyroscope, and significant-motion sensors to resting desk values.",
+    )
+
+    val spoofPackageSignature by booleanOption(
+        key = "spoofPackageSignature",
+        default = ${config.spoofPackageSignature},
+        title = "Static Package Signature Spoof",
+        description = "Replace PackageInfo.signatures returned by PackageManager.getPackageInfo() with Original Certificate DER Hex.",
+    )
+
+    val originalSignatureHex by stringOption(
+        key = "originalSignatureHex",
+        default = "${escapedSigHex}",
+        title = "Original Certificate DER Hex",
+        description = "Optional hex-encoded X.509 DER certificate used when Static Package Signature Spoof is enabled.",
+    )
+
+    val softFailIntegrityChecks by booleanOption(
+        key = "softFailIntegrityChecks",
+        default = ${config.softFailIntegrityChecks},
+        title = "Play Integrity / SafetyNet Soft-Fail",
+        description = "Clear local Integrity / SafetyNet / attestation exceptions on Task.getException() checks.",
     )
 
     val hookSettingsLockToApp by booleanOption(
@@ -3175,7 +4488,7 @@ val pinSpoofPatch = bytecodePatch(
         key = "debugLogging",
         default = ${config.debugLogging},
         title = "Verbose Logcat Debug Logging",
-        description = "Emit Log.d(\\"${config.moduleName}\\", ...) traces when patched hooks intercept pinning or focus events.",
+        description = "Emit Log.d(\\"PinSpoof\\", ...) traces when patched hooks intercept pinning or focus events.",
     )
 
     extendWith("extensions/extension.mpe")
@@ -3188,6 +4501,30 @@ val pinSpoofPatch = bytecodePatch(
         Fingerprint(definingClass = EXTENSION_CLASS, name = "debugLogging")
             .method
             .returnEarly(debugLogging == true)
+        Fingerprint(definingClass = EXTENSION_CLASS, name = "cloakPackagesEnabled")
+            .method
+            .returnEarly(cloakPackagesAndInstaller == true)
+        Fingerprint(definingClass = EXTENSION_CLASS, name = "spoofSignatureEnabled")
+            .method
+            .returnEarly(spoofPackageSignature == true)
+
+        val escapedSigHex = (originalSignatureHex ?: "")
+            .replace("\\\\", "")
+            .replace("\\"", "")
+            .replace(":", "")
+            .replace(" ", "")
+            .trim()
+        if (escapedSigHex.isNotEmpty()) {
+            Fingerprint(definingClass = EXTENSION_CLASS, name = "originalSignatureHex")
+                .method
+                .addInstructions(
+                    0,
+                    """
+                        const-string v0, "\$escapedSigHex"
+                        return-object v0
+                    """.trimIndent(),
+                )
+        }
 
         if (hookActivityLockTask == true) {
             rewriteInstanceCalls(
@@ -3195,14 +4532,14 @@ val pinSpoofPatch = bytecodePatch(
                 parameters = emptyList(),
                 returnType = "V",
                 matchesReceiver = { isActivityType(it) },
-                targetMethod = "$EXTENSION_CLASS->startLockTask(Landroid/app/Activity;)V",
+                targetMethod = "\$EXTENSION_CLASS->startLockTask(Landroid/app/Activity;)V",
             )
             rewriteInstanceCalls(
                 methodName = "stopLockTask",
                 parameters = emptyList(),
                 returnType = "V",
                 matchesReceiver = { isActivityType(it) },
-                targetMethod = "$EXTENSION_CLASS->stopLockTask(Landroid/app/Activity;)V",
+                targetMethod = "\$EXTENSION_CLASS->stopLockTask(Landroid/app/Activity;)V",
             )
             swallowLockTaskTokenCalls(includeBinderProxies = hookBinderProxies == true)
         }
@@ -3213,14 +4550,14 @@ val pinSpoofPatch = bytecodePatch(
                 parameters = emptyList(),
                 returnType = "I",
                 matchesReceiver = { it == "Landroid/app/ActivityManager;" },
-                targetMethod = "$EXTENSION_CLASS->getLockTaskModeState(Landroid/app/ActivityManager;)I",
+                targetMethod = "\$EXTENSION_CLASS->getLockTaskModeState(Landroid/app/ActivityManager;)I",
             )
             rewriteInstanceCalls(
                 methodName = "isInLockTaskMode",
                 parameters = emptyList(),
                 returnType = "Z",
                 matchesReceiver = { it == "Landroid/app/ActivityManager;" },
-                targetMethod = "$EXTENSION_CLASS->isInLockTaskMode(Landroid/app/ActivityManager;)Z",
+                targetMethod = "\$EXTENSION_CLASS->isInLockTaskMode(Landroid/app/ActivityManager;)Z",
             )
         }
 
@@ -3230,22 +4567,22 @@ val pinSpoofPatch = bytecodePatch(
                 parameters = emptyList(),
                 returnType = "Z",
                 matchesReceiver = { isActivityType(it) },
-                targetMethod = "$EXTENSION_CLASS->hasWindowFocus(Landroid/app/Activity;)Z",
+                targetMethod = "\$EXTENSION_CLASS->hasWindowFocus(Landroid/app/Activity;)Z",
             )
             rewriteInstanceCalls(
                 methodName = "hasWindowFocus",
                 parameters = emptyList(),
                 returnType = "Z",
                 matchesReceiver = { isViewType(it) },
-                targetMethod = "$EXTENSION_CLASS->hasWindowFocus(Landroid/view/View;)Z",
+                targetMethod = "\$EXTENSION_CLASS->hasWindowFocus(Landroid/view/View;)Z",
             )
             methodCall(
-                smali = "Landroid/app/ActivityManager;->getMyMemoryState(Landroid/app/ActivityManager\\$RunningAppProcessInfo;)V"
+                smali = "Landroid/app/ActivityManager;->getMyMemoryState(Landroid/app/ActivityManager\\\$RunningAppProcessInfo;)V"
             ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
                 if (!definingClass.startsWith(EXTENSION_PREFIX)) {
                     replaceCallAt(
                         index,
-                        "$EXTENSION_CLASS->getMyMemoryState(Landroid/app/ActivityManager\\$RunningAppProcessInfo;)V",
+                        "\$EXTENSION_CLASS->getMyMemoryState(Landroid/app/ActivityManager\\\$RunningAppProcessInfo;)V",
                     )
                 }
             }
@@ -3257,14 +4594,14 @@ val pinSpoofPatch = bytecodePatch(
                 parameters = emptyList(),
                 returnType = "V",
                 matchesReceiver = { isWebViewType(it) },
-                targetMethod = "$EXTENSION_CLASS->onWebViewPause(Landroid/webkit/WebView;)V",
+                targetMethod = "\$EXTENSION_CLASS->onWebViewPause(Landroid/webkit/WebView;)V",
             )
             rewriteInstanceCalls(
                 methodName = "pauseTimers",
                 parameters = emptyList(),
                 returnType = "V",
                 matchesReceiver = { isWebViewType(it) },
-                targetMethod = "$EXTENSION_CLASS->onWebViewPauseTimers(Landroid/webkit/WebView;)V",
+                targetMethod = "\$EXTENSION_CLASS->onWebViewPauseTimers(Landroid/webkit/WebView;)V",
             )
         }
 
@@ -3274,14 +4611,14 @@ val pinSpoofPatch = bytecodePatch(
                 parameters = emptyList(),
                 returnType = "Z",
                 matchesReceiver = { isActivityType(it) },
-                targetMethod = "$EXTENSION_CLASS->isInMultiWindowMode(Landroid/app/Activity;)Z",
+                targetMethod = "\$EXTENSION_CLASS->isInMultiWindowMode(Landroid/app/Activity;)Z",
             )
             rewriteInstanceCalls(
                 methodName = "isInPictureInPictureMode",
                 parameters = emptyList(),
                 returnType = "Z",
                 matchesReceiver = { isActivityType(it) },
-                targetMethod = "$EXTENSION_CLASS->isInPictureInPictureMode(Landroid/app/Activity;)Z",
+                targetMethod = "\$EXTENSION_CLASS->isInPictureInPictureMode(Landroid/app/Activity;)Z",
             )
         }
 
@@ -3291,14 +4628,14 @@ val pinSpoofPatch = bytecodePatch(
                 parameters = listOf("I"),
                 returnType = "Landroid/graphics/Insets;",
                 matchesReceiver = { it == "Landroid/view/WindowInsets;" },
-                targetMethod = "$EXTENSION_CLASS->getWindowInsets(Landroid/view/WindowInsets;I)Landroid/graphics/Insets;",
+                targetMethod = "\$EXTENSION_CLASS->getWindowInsets(Landroid/view/WindowInsets;I)Landroid/graphics/Insets;",
             )
             rewriteInstanceCalls(
                 methodName = "isVisible",
                 parameters = listOf("I"),
                 returnType = "Z",
                 matchesReceiver = { it == "Landroid/view/WindowInsets;" },
-                targetMethod = "$EXTENSION_CLASS->isWindowInsetsVisible(Landroid/view/WindowInsets;I)Z",
+                targetMethod = "\$EXTENSION_CLASS->isWindowInsetsVisible(Landroid/view/WindowInsets;I)Z",
             )
             listOf(
                 "getSystemWindowInsetTop",
@@ -3311,7 +4648,7 @@ val pinSpoofPatch = bytecodePatch(
                     parameters = emptyList(),
                     returnType = "I",
                     matchesReceiver = { it == "Landroid/view/WindowInsets;" },
-                    targetMethod = "$EXTENSION_CLASS->getZeroSystemInset(Landroid/view/WindowInsets;)I",
+                    targetMethod = "\$EXTENSION_CLASS->getZeroSystemInset(Landroid/view/WindowInsets;)I",
                 )
             }
         }
@@ -3322,21 +4659,62 @@ val pinSpoofPatch = bytecodePatch(
                 parameters = listOf("I", "I"),
                 returnType = "V",
                 matchesReceiver = { isWindowType(it) },
-                targetMethod = "$EXTENSION_CLASS->windowSetFlags(Landroid/view/Window;II)V",
+                targetMethod = "\$EXTENSION_CLASS->windowSetFlags(Landroid/view/Window;II)V",
             )
             rewriteInstanceCalls(
                 methodName = "addFlags",
                 parameters = listOf("I"),
                 returnType = "V",
                 matchesReceiver = { isWindowType(it) },
-                targetMethod = "$EXTENSION_CLASS->windowAddFlags(Landroid/view/Window;I)V",
+                targetMethod = "\$EXTENSION_CLASS->windowAddFlags(Landroid/view/Window;I)V",
             )
             rewriteInstanceCalls(
                 methodName = "setSecure",
                 parameters = listOf("Z"),
                 returnType = "V",
                 matchesReceiver = { isSurfaceViewType(it) },
-                targetMethod = "$EXTENSION_CLASS->surfaceViewSetSecure(Landroid/view/SurfaceView;Z)V",
+                targetMethod = "\$EXTENSION_CLASS->surfaceViewSetSecure(Landroid/view/SurfaceView;Z)V",
+            )
+        }
+
+        if (bypassVirtualDisplays == true) {
+            rewriteInstanceCalls(
+                methodName = "getDisplays",
+                parameters = emptyList(),
+                returnType = "[Landroid/view/Display;",
+                matchesReceiver = { it == "Landroid/hardware/display/DisplayManager;" },
+                targetMethod = "\$EXTENSION_CLASS->getDisplays(Landroid/hardware/display/DisplayManager;)[Landroid/view/Display;",
+            )
+            rewriteInstanceCalls(
+                methodName = "getDisplays",
+                parameters = listOf("Ljava/lang/String;"),
+                returnType = "[Landroid/view/Display;",
+                matchesReceiver = { it == "Landroid/hardware/display/DisplayManager;" },
+                targetMethod = "\$EXTENSION_CLASS->getDisplays(Landroid/hardware/display/DisplayManager;Ljava/lang/String;)[Landroid/view/Display;",
+            )
+            rewriteInstanceCalls(
+                methodName = "getDisplay",
+                parameters = listOf("I"),
+                returnType = "Landroid/view/Display;",
+                matchesReceiver = { it == "Landroid/hardware/display/DisplayManager;" },
+                targetMethod = "\$EXTENSION_CLASS->getDisplay(Landroid/hardware/display/DisplayManager;I)Landroid/view/Display;",
+            )
+        }
+
+        if (unblockClipboard == true) {
+            rewriteInstanceCalls(
+                methodName = "clearPrimaryClip",
+                parameters = emptyList(),
+                returnType = "V",
+                matchesReceiver = { it == "Landroid/content/ClipboardManager;" },
+                targetMethod = "\$EXTENSION_CLASS->onClipboardClear(Landroid/content/ClipboardManager;)V",
+            )
+            rewriteInstanceCalls(
+                methodName = "setPrimaryClip",
+                parameters = listOf("Landroid/content/ClipData;"),
+                returnType = "V",
+                matchesReceiver = { it == "Landroid/content/ClipboardManager;" },
+                targetMethod = "\$EXTENSION_CLASS->onClipboardSetPrimaryClip(Landroid/content/ClipboardManager;Landroid/content/ClipData;)V",
             )
         }
 
@@ -3347,7 +4725,7 @@ val pinSpoofPatch = bytecodePatch(
                 if (!definingClass.startsWith(EXTENSION_PREFIX)) {
                     replaceCallAt(
                         index,
-                        "$EXTENSION_CLASS->getEnabledAccessibilityServiceList(Landroid/view/accessibility/AccessibilityManager;I)Ljava/util/List;",
+                        "\$EXTENSION_CLASS->getEnabledAccessibilityServiceList(Landroid/view/accessibility/AccessibilityManager;I)Ljava/util/List;",
                     )
                 }
             }
@@ -3357,30 +4735,123 @@ val pinSpoofPatch = bytecodePatch(
                 if (!definingClass.startsWith(EXTENSION_PREFIX)) {
                     replaceCallAt(
                         index,
-                        "$EXTENSION_CLASS->canDrawOverlays(Landroid/content/Context;)Z",
+                        "\$EXTENSION_CLASS->canDrawOverlays(Landroid/content/Context;)Z",
                     )
+                }
+            }
+        }
+
+        if (cloakPackagesAndInstaller == true) {
+            rewriteInstanceCalls(
+                methodName = "getInstallerPackageName",
+                parameters = listOf("Ljava/lang/String;"),
+                returnType = "Ljava/lang/String;",
+                matchesReceiver = { it == "Landroid/content/pm/PackageManager;" },
+                targetMethod = "\$EXTENSION_CLASS->getInstallerPackageName(Landroid/content/pm/PackageManager;Ljava/lang/String;)Ljava/lang/String;",
+            )
+            rewriteInstanceCalls(
+                methodName = "getInstalledPackages",
+                parameters = listOf("I"),
+                returnType = "Ljava/util/List;",
+                matchesReceiver = { it == "Landroid/content/pm/PackageManager;" },
+                targetMethod = "\$EXTENSION_CLASS->getInstalledPackages(Landroid/content/pm/PackageManager;I)Ljava/util/List;",
+            )
+            rewriteInstanceCalls(
+                methodName = "getInstalledApplications",
+                parameters = listOf("I"),
+                returnType = "Ljava/util/List;",
+                matchesReceiver = { it == "Landroid/content/pm/PackageManager;" },
+                targetMethod = "\$EXTENSION_CLASS->getInstalledApplications(Landroid/content/pm/PackageManager;I)Ljava/util/List;",
+            )
+            rewriteInstanceCalls(
+                methodName = "queryIntentActivities",
+                parameters = listOf("Landroid/content/Intent;", "I"),
+                returnType = "Ljava/util/List;",
+                matchesReceiver = { it == "Landroid/content/pm/PackageManager;" },
+                targetMethod = "\$EXTENSION_CLASS->queryIntentActivities(Landroid/content/pm/PackageManager;Landroid/content/Intent;I)Ljava/util/List;",
+            )
+        }
+
+        if (cloakPackagesAndInstaller == true || spoofPackageSignature == true) {
+            rewriteInstanceCalls(
+                methodName = "getPackageInfo",
+                parameters = listOf("Ljava/lang/String;", "I"),
+                returnType = "Landroid/content/pm/PackageInfo;",
+                matchesReceiver = { it == "Landroid/content/pm/PackageManager;" },
+                targetMethod = "\$EXTENSION_CLASS->getPackageInfo(Landroid/content/pm/PackageManager;Ljava/lang/String;I)Landroid/content/pm/PackageInfo;",
+            )
+        }
+
+        if (sanitizeStackTraces == true) {
+            methodCall(
+                smali = "Ljava/lang/Thread;->getStackTrace()[Ljava/lang/StackTraceElement;"
+            ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                    replaceCallAt(
+                        index,
+                        "\$EXTENSION_CLASS->getThreadStackTrace(Ljava/lang/Thread;)[Ljava/lang/StackTraceElement;",
+                    )
+                }
+            }
+            methodCall(
+                smali = "Ljava/lang/Throwable;->getStackTrace()[Ljava/lang/StackTraceElement;"
+            ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                    replaceCallAt(
+                        index,
+                        "\$EXTENSION_CLASS->getThrowableStackTrace(Ljava/lang/Throwable;)[Ljava/lang/StackTraceElement;",
+                    )
+                }
+            }
+        }
+
+        if (spoofMotionSensors == true) {
+            methodCall(
+                smali = "Landroid/hardware/SensorManager;->requestTriggerSensor(Landroid/hardware/TriggerEventListener;Landroid/hardware/Sensor;)Z"
+            ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                    replaceCallAt(
+                        index,
+                        "\$EXTENSION_CLASS->requestTriggerSensor(Landroid/hardware/SensorManager;Landroid/hardware/TriggerEventListener;Landroid/hardware/Sensor;)Z",
+                    )
+                }
+            }
+        }
+
+        if (softFailIntegrityChecks == true) {
+            listOf(
+                "Lcom/google/android/gms/tasks/Task;->getException()Ljava/lang/Exception;",
+                "Lcom/google/android/play/core/tasks/Task;->getException()Ljava/lang/Exception;",
+            ).forEach { sig ->
+                methodCall(smali = sig).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                    if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                        replaceCallAt(
+                            index,
+                            "\$EXTENSION_CLASS->softFailTaskException(Ljava/lang/Object;)Ljava/lang/Exception;",
+                        )
+                    }
                 }
             }
         }
 
         if (hookSettingsLockToApp == true) {
             methodCall(
-                smali = "Landroid/provider/Settings\\$System;->getInt(Landroid/content/ContentResolver;Ljava/lang/String;I)I"
+                smali = "Landroid/provider/Settings\\\$System;->getInt(Landroid/content/ContentResolver;Ljava/lang/String;I)I"
             ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
                 if (!definingClass.startsWith(EXTENSION_PREFIX)) {
                     replaceCallAt(
                         index,
-                        "$EXTENSION_CLASS->getSettingsSystemInt(Landroid/content/ContentResolver;Ljava/lang/String;I)I",
+                        "\$EXTENSION_CLASS->getSettingsSystemInt(Landroid/content/ContentResolver;Ljava/lang/String;I)I",
                     )
                 }
             }
             methodCall(
-                smali = "Landroid/provider/Settings\\$System;->getInt(Landroid/content/ContentResolver;Ljava/lang/String;)I"
+                smali = "Landroid/provider/Settings\\\$System;->getInt(Landroid/content/ContentResolver;Ljava/lang/String;)I"
             ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
                 if (!definingClass.startsWith(EXTENSION_PREFIX)) {
                     replaceCallAt(
                         index,
-                        "$EXTENSION_CLASS->getSettingsSystemInt(Landroid/content/ContentResolver;Ljava/lang/String;)I",
+                        "\$EXTENSION_CLASS->getSettingsSystemInt(Landroid/content/ContentResolver;Ljava/lang/String;)I",
                     )
                 }
             }
@@ -3393,7 +4864,7 @@ val pinSpoofPatch = bytecodePatch(
                 if (!definingClass.startsWith(EXTENSION_PREFIX)) {
                     replaceCallAt(
                         index,
-                        "$EXTENSION_CLASS->isLockTaskPermitted(Landroid/app/admin/DevicePolicyManager;Ljava/lang/String;)Z",
+                        "\$EXTENSION_CLASS->isLockTaskPermitted(Landroid/app/admin/DevicePolicyManager;Ljava/lang/String;)Z",
                     )
                 }
             }
@@ -3402,13 +4873,17 @@ val pinSpoofPatch = bytecodePatch(
         if (hideFocusLoss == true ||
             hideWebViewVisibility == true ||
             hideLifecycleLoss == true ||
-            retainAudioFocus == true
+            retainAudioFocus == true ||
+            spoofMotionSensors == true ||
+            bypassVirtualDisplays == true
         ) {
             patchAppSubclassOverrides(
                 hideFocus = hideFocusLoss == true,
                 hideWebView = hideWebViewVisibility == true,
                 hideLifecycle = hideLifecycleLoss == true,
                 retainAudio = retainAudioFocus == true,
+                spoofSensors = spoofMotionSensors == true,
+                bypassDisplays = bypassVirtualDisplays == true,
             )
         }
     }
@@ -3491,7 +4966,7 @@ private fun BytecodePatchContext.swallowLockTaskTokenCalls(includeBinderProxies:
             val isClient = ref.definingClass == "Landroid/app/ActivityClient;"
             val isBinder = includeBinderProxies && ref.definingClass.startsWith("Landroid/app/IActivity")
             if (isClient || isBinder) {
-                replaceInstruction(index, "invoke-static {}, $EXTENSION_CLASS->onLockTaskTokenCall()V")
+                replaceInstruction(index, "invoke-static {}, \$EXTENSION_CLASS->onLockTaskTokenCall()V")
             }
         }
     }
@@ -3502,9 +4977,9 @@ private fun MutableMethod.replaceCallAt(index: Int, targetMethod: String) {
     val regs = insn.registersUsed
     val useRange = insn.opcode.name.endsWith("_RANGE") || regs.any { it > 15 }
     val invokeSmali = when {
-        regs.isEmpty() -> "invoke-static {}, $targetMethod"
-        useRange -> "invoke-static/range { v\${regs.first()} .. v\${regs.last()} }, $targetMethod"
-        else -> "invoke-static { \${regs.joinToString(", ") { "v$it" }} }, $targetMethod"
+        regs.isEmpty() -> "invoke-static {}, \$targetMethod"
+        useRange -> "invoke-static/range { v\${regs.first()} .. v\${regs.last()} }, \$targetMethod"
+        else -> "invoke-static { \${regs.joinToString(", ") { "v\$it" }} }, \$targetMethod"
     }
     replaceInstruction(index, invokeSmali)
 }
@@ -3514,6 +4989,8 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
     hideWebView: Boolean,
     hideLifecycle: Boolean,
     retainAudio: Boolean,
+    spoofSensors: Boolean,
+    bypassDisplays: Boolean,
 ) {
     val activityTargets = mutableListOf<ClassDef>()
     val fragmentTargets = mutableListOf<ClassDef>()
@@ -3522,6 +4999,8 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
     val lifecycleCallbackTargets = mutableListOf<ClassDef>()
     val focusListenerTargets = mutableListOf<ClassDef>()
     val audioListenerTargets = mutableListOf<ClassDef>()
+    val sensorListenerTargets = mutableListOf<ClassDef>()
+    val displayListenerTargets = mutableListOf<ClassDef>()
 
     classDefForEach { classDef ->
         val type = classDef.type
@@ -3572,7 +5051,7 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
             if (hasPageFinished) webViewClientTargets += classDef
         }
 
-        if (hideLifecycle && "Landroid/app/Application\\$ActivityLifecycleCallbacks;" in classDef.interfaces) {
+        if (hideLifecycle && "Landroid/app/Application\\\$ActivityLifecycleCallbacks;" in classDef.interfaces) {
             val hasCb = classDef.methods.any { m ->
                 m.implementation != null &&
                     (m.name == "onActivityPaused" || m.name == "onActivityStopped") &&
@@ -3582,7 +5061,7 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
             if (hasCb) lifecycleCallbackTargets += classDef
         }
 
-        if (hideFocus && "Landroid/view/ViewTreeObserver\\$OnWindowFocusChangeListener;" in classDef.interfaces) {
+        if (hideFocus && "Landroid/view/ViewTreeObserver\\\$OnWindowFocusChangeListener;" in classDef.interfaces) {
             val hasListener = classDef.methods.any { m ->
                 m.implementation != null &&
                     m.name == "onWindowFocusChanged" &&
@@ -3592,7 +5071,7 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
             if (hasListener) focusListenerTargets += classDef
         }
 
-        if (retainAudio && "Landroid/media/AudioManager\\$OnAudioFocusChangeListener;" in classDef.interfaces) {
+        if (retainAudio && "Landroid/media/AudioManager\\\$OnAudioFocusChangeListener;" in classDef.interfaces) {
             val hasAudio = classDef.methods.any { m ->
                 m.implementation != null &&
                     m.name == "onAudioFocusChange" &&
@@ -3600,6 +5079,26 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
                     m.returnType == "V"
             }
             if (hasAudio) audioListenerTargets += classDef
+        }
+
+        if (spoofSensors && "Landroid/hardware/SensorEventListener;" in classDef.interfaces) {
+            val hasSensor = classDef.methods.any { m ->
+                m.implementation != null &&
+                    m.name == "onSensorChanged" &&
+                    m.parameterTypes == listOf("Landroid/hardware/SensorEvent;") &&
+                    m.returnType == "V"
+            }
+            if (hasSensor) sensorListenerTargets += classDef
+        }
+
+        if (bypassDisplays && "Landroid/hardware/display/DisplayManager\\\$DisplayListener;" in classDef.interfaces) {
+            val hasDisplayCb = classDef.methods.any { m ->
+                m.implementation != null &&
+                    (m.name == "onDisplayAdded" || m.name == "onDisplayChanged") &&
+                    m.parameterTypes == listOf("I") &&
+                    m.returnType == "V"
+            }
+            if (hasDisplayCb) displayListenerTargets += classDef
         }
     }
 
@@ -3687,7 +5186,7 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
             ) {
                 method.addInstructions(
                     0,
-                    "invoke-static/range { p1 .. p1 }, $EXTENSION_CLASS->injectWebViewStealth(Landroid/webkit/WebView;)V",
+                    "invoke-static/range { p1 .. p1 }, \$EXTENSION_CLASS->injectWebViewStealth(Landroid/webkit/WebView;)V",
                 )
             }
         }
@@ -3732,21 +5231,50 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
         }
     }
 
+    sensorListenerTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if (method.name == "onSensorChanged" &&
+                method.parameterTypes == listOf("Landroid/hardware/SensorEvent;") &&
+                method.returnType == "V"
+            ) {
+                method.addInstructions(
+                    0,
+                    "invoke-static/range { p1 .. p1 }, \$EXTENSION_CLASS->sanitizeSensorEvent(Landroid/hardware/SensorEvent;)V",
+                )
+            }
+        }
+    }
+
+    displayListenerTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if ((method.name == "onDisplayAdded" || method.name == "onDisplayChanged") &&
+                method.parameterTypes == listOf("I") &&
+                method.returnType == "V"
+            ) {
+                skipNonDefaultDisplayCallback(method)
+            }
+        }
+    }
+
     if (hideLifecycle) {
         classDefByOrNull("Landroidx/lifecycle/LifecycleRegistry;")?.let { registryClass ->
             val mutable = mutableClassDefBy(registryClass)
             val handleMethod = mutable.methods.firstOrNull {
                 it.implementation != null &&
                     it.name == "handleLifecycleEvent" &&
-                    it.parameterTypes == listOf("Landroidx/lifecycle/Lifecycle\\$Event;") &&
+                    it.parameterTypes == listOf("Landroidx/lifecycle/Lifecycle\\\$Event;") &&
                     it.returnType == "V"
             }
             if (handleMethod != null) {
                 prepareEntryScratch(handleMethod) { freeReg, _, p1Reg ->
                     """
-                        invoke-static/range { $p1Reg .. $p1Reg }, $EXTENSION_CLASS->shouldSuppressLifecycleEvent(Ljava/lang/Object;)Z
-                        move-result $freeReg
-                        if-eqz $freeReg, :pinspoof_orig
+                        invoke-static/range { \$p1Reg .. \$p1Reg }, \$EXTENSION_CLASS->shouldSuppressLifecycleEvent(Ljava/lang/Object;)Z
+                        move-result \$freeReg
+                        if-eqz \$freeReg, :pinspoof_orig
                         return-void
                         :pinspoof_orig
                         nop
@@ -3769,11 +5297,23 @@ private fun skipWhenBooleanParamFalse(method: MutableMethod) {
     )
 }
 
+private fun skipNonDefaultDisplayCallback(method: MutableMethod) {
+    method.addInstructions(
+        0,
+        """
+            if-eqz p1, :pinspoof_default
+            return-void
+            :pinspoof_default
+            nop
+        """.trimIndent(),
+    )
+}
+
 private fun forceWindowVisibilityVisible(method: MutableMethod) {
     method.addInstructions(
         0,
         """
-            invoke-static/range { p1 .. p1 }, $EXTENSION_CLASS->filterWindowVisibility(I)I
+            invoke-static/range { p1 .. p1 }, \$EXTENSION_CLASS->filterWindowVisibility(I)I
             move-result p1
         """.trimIndent(),
     )
@@ -3782,9 +5322,9 @@ private fun forceWindowVisibilityVisible(method: MutableMethod) {
 private fun BytecodePatchContext.suppressAudioFocusLoss(method: MutableMethod) {
     prepareEntryScratch(method) { freeReg, _, p1Reg ->
         """
-            invoke-static/range { $p1Reg .. $p1Reg }, $EXTENSION_CLASS->shouldSuppressAudioFocusLoss(I)Z
-            move-result $freeReg
-            if-eqz $freeReg, :pinspoof_orig
+            invoke-static/range { \$p1Reg .. \$p1Reg }, \$EXTENSION_CLASS->shouldSuppressAudioFocusLoss(I)Z
+            move-result \$freeReg
+            if-eqz \$freeReg, :pinspoof_orig
             return-void
             :pinspoof_orig
             nop
@@ -3800,14 +5340,14 @@ private fun BytecodePatchContext.bypassActivityLifecycleMethod(
 ) {
     prepareEntryScratch(method) { freeReg, p0Reg, _ ->
         val superCall = if (callSuper) {
-            "invoke-super/range { $p0Reg .. $p0Reg }, $superType->$methodName()V\\n"
+            "invoke-super/range { \$p0Reg .. \$p0Reg }, \$superType->\$methodName()V\\n"
         } else {
             ""
         }
         """
-            invoke-static/range { $p0Reg .. $p0Reg }, $EXTENSION_CLASS->shouldSuppressLifecycle(Landroid/app/Activity;)Z
-            move-result $freeReg
-            if-eqz $freeReg, :pinspoof_orig
+            invoke-static/range { \$p0Reg .. \$p0Reg }, \$EXTENSION_CLASS->shouldSuppressLifecycle(Landroid/app/Activity;)Z
+            move-result \$freeReg
+            if-eqz \$freeReg, :pinspoof_orig
             \${superCall}return-void
             :pinspoof_orig
             nop
@@ -3822,12 +5362,12 @@ private fun BytecodePatchContext.bypassFragmentLifecycleMethod(
 ) {
     prepareEntryScratch(method) { freeReg, p0Reg, _ ->
         """
-            invoke-virtual/range { $p0Reg .. $p0Reg }, $superType->getActivity()Landroid/app/Activity;
-            move-result-object $freeReg
-            invoke-static/range { $freeReg .. $freeReg }, $EXTENSION_CLASS->shouldSuppressLifecycle(Landroid/app/Activity;)Z
-            move-result $freeReg
-            if-eqz $freeReg, :pinspoof_orig
-            invoke-super/range { $p0Reg .. $p0Reg }, $superType->$methodName()V
+            invoke-virtual/range { \$p0Reg .. \$p0Reg }, \$superType->getActivity()Landroid/app/Activity;
+            move-result-object \$freeReg
+            invoke-static/range { \$freeReg .. \$freeReg }, \$EXTENSION_CLASS->shouldSuppressLifecycle(Landroid/app/Activity;)Z
+            move-result \$freeReg
+            if-eqz \$freeReg, :pinspoof_orig
+            invoke-super/range { \$p0Reg .. \$p0Reg }, \$superType->\$methodName()V
             return-void
             :pinspoof_orig
             nop
@@ -3838,9 +5378,9 @@ private fun BytecodePatchContext.bypassFragmentLifecycleMethod(
 private fun BytecodePatchContext.skipLifecycleCallbackIfNotFinishing(method: MutableMethod) {
     prepareEntryScratch(method) { freeReg, _, p1Reg ->
         """
-            invoke-static/range { $p1Reg .. $p1Reg }, $EXTENSION_CLASS->shouldSuppressLifecycle(Landroid/app/Activity;)Z
-            move-result $freeReg
-            if-eqz $freeReg, :pinspoof_orig
+            invoke-static/range { \$p1Reg .. \$p1Reg }, \$EXTENSION_CLASS->shouldSuppressLifecycle(Landroid/app/Activity;)Z
+            move-result \$freeReg
+            if-eqz \$freeReg, :pinspoof_orig
             return-void
             :pinspoof_orig
             nop
@@ -3861,7 +5401,7 @@ private fun BytecodePatchContext.prepareEntryScratch(
     }
     val free = runCatching { method.findFreeRegister(0, *paramRegs) }.getOrNull()
     if (free != null && free < 256) {
-        method.addInstructions(0, buildSmali("v$free", "p0", "p1"))
+        method.addInstructions(0, buildSmali("v\$free", "p0", "p1"))
         return
     }
     if (impl.registerCount < 250) {
@@ -3869,7 +5409,7 @@ private fun BytecodePatchContext.prepareEntryScratch(
         val insertIdx = cloned.numberOfParameterRegistersLogical
         cloned.addInstructions(
             insertIdx,
-            buildSmali("p0", "v$origP0", "v\${origP0 + 1}"),
+            buildSmali("p0", "v\$origP0", "v\${origP0 + 1}"),
         )
     }
 }
@@ -3883,12 +5423,26 @@ import android.annotation.TargetApi;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.admin.DevicePolicyManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.ContentResolver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.content.pm.Signature;
 import android.graphics.Insets;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorManager;
+import android.hardware.TriggerEventListener;
+import android.hardware.display.DisplayManager;
 import android.os.Build;
 import android.provider.Settings;
 import android.util.Log;
+import android.view.Display;
 import android.view.SurfaceView;
 import android.view.View;
 import android.view.Window;
@@ -3896,8 +5450,13 @@ import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityManager;
 import android.webkit.WebView;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Runtime hook targets merged into the patched APK by ${config.moduleName} v${config.versionName} Morphe Patch.
@@ -3905,7 +5464,7 @@ import java.util.List;
  */
 @SuppressWarnings({"unused", "deprecation"})
 public final class PinSpoofHooks {
-    private static final String TAG = "${config.moduleName}";
+    private static final String TAG = "PinSpoof";
     private static final String WEBVIEW_STEALTH_JS =
             "(function(){"
                     + "if(window.__pinspoofStealthApplied)return;"
@@ -3928,23 +5487,46 @@ public final class PinSpoofHooks {
                     + "}catch(e){}"
                     + "})();";
 
+    private static final Set<String> CLOAKED_PACKAGES = new HashSet<>(Arrays.asList(
+            "de.robv.android.xposed.installer",
+            "org.lsposed.manager",
+            "io.github.lsposed.manager",
+            "app.morphe.manager",
+            "com.topjohnwu.magisk",
+            "us.redcatx.pinspoof"
+    ));
+
+    private static final String[] STACK_MARKERS = new String[]{
+            "de.robv.android.xposed",
+            "LSPHooker",
+            "EdHooker",
+            "me.weishu.epic",
+            "us.redcatx.pinspoof"
+    };
+
     private static volatile boolean spoofedPinned = false;
 
     private PinSpoofHooks() {
     }
 
-    /**
-     * Overridden at patch time via PinSpoofPatch ("Always Spoof Pinned" option).
-     */
     public static boolean alwaysSpoofPinned() {
         return false;
     }
 
-    /**
-     * Overridden at patch time via PinSpoofPatch ("Verbose Debug Logging" option).
-     */
     public static boolean debugLogging() {
         return false;
+    }
+
+    public static boolean cloakPackagesEnabled() {
+        return false;
+    }
+
+    public static boolean spoofSignatureEnabled() {
+        return false;
+    }
+
+    public static String originalSignatureHex() {
+        return "";
     }
 
     public static void log(String message) {
@@ -4141,6 +5723,220 @@ public final class PinSpoofHooks {
             log("Suppressed OnAudioFocusChangeListener(" + focusChange + ")");
         }
         return suppress;
+    }
+
+    public static String getInstallerPackageName(PackageManager pm, String packageName) {
+        log("PackageManager.getInstallerPackageName(" + packageName + ") -> com.android.vending");
+        return "com.android.vending";
+    }
+
+    public static List<PackageInfo> getInstalledPackages(PackageManager pm, int flags) {
+        if (pm == null) {
+            return Collections.emptyList();
+        }
+        List<PackageInfo> raw = pm.getInstalledPackages(flags);
+        List<PackageInfo> out = new ArrayList<>(raw.size());
+        for (PackageInfo info : raw) {
+            if (info == null || !CLOAKED_PACKAGES.contains(info.packageName)) {
+                out.add(info);
+            }
+        }
+        return out;
+    }
+
+    public static List<ApplicationInfo> getInstalledApplications(PackageManager pm, int flags) {
+        if (pm == null) {
+            return Collections.emptyList();
+        }
+        List<ApplicationInfo> raw = pm.getInstalledApplications(flags);
+        List<ApplicationInfo> out = new ArrayList<>(raw.size());
+        for (ApplicationInfo info : raw) {
+            if (info == null || !CLOAKED_PACKAGES.contains(info.packageName)) {
+                out.add(info);
+            }
+        }
+        return out;
+    }
+
+    public static List<ResolveInfo> queryIntentActivities(PackageManager pm, Intent intent, int flags) {
+        if (pm == null) {
+            return Collections.emptyList();
+        }
+        List<ResolveInfo> raw = pm.queryIntentActivities(intent, flags);
+        List<ResolveInfo> out = new ArrayList<>(raw.size());
+        for (ResolveInfo info : raw) {
+            String pkg = info != null && info.activityInfo != null ? info.activityInfo.packageName : null;
+            if (pkg == null || !CLOAKED_PACKAGES.contains(pkg)) {
+                out.add(info);
+            }
+        }
+        return out;
+    }
+
+    public static PackageInfo getPackageInfo(PackageManager pm, String packageName, int flags)
+            throws PackageManager.NameNotFoundException {
+        if (cloakPackagesEnabled() && packageName != null && CLOAKED_PACKAGES.contains(packageName)) {
+            log("Cloaked getPackageInfo() for " + packageName);
+            throw new PackageManager.NameNotFoundException(packageName);
+        }
+        if (pm == null) {
+            throw new PackageManager.NameNotFoundException(packageName);
+        }
+        PackageInfo info = pm.getPackageInfo(packageName, flags);
+        if (spoofSignatureEnabled() && info != null) {
+            String hex = originalSignatureHex().replace(":", "").replace(" ", "").trim();
+            if (hex.length() >= 128) {
+                try {
+                    info.signatures = new Signature[]{new Signature(hex)};
+                    log("Replaced PackageInfo.signatures for " + packageName);
+                } catch (Throwable ignored) {
+                }
+            }
+        }
+        return info;
+    }
+
+    public static StackTraceElement[] getThreadStackTrace(Thread thread) {
+        if (thread == null) {
+            return new StackTraceElement[0];
+        }
+        return sanitizeStackTrace(thread.getStackTrace());
+    }
+
+    public static StackTraceElement[] getThrowableStackTrace(Throwable throwable) {
+        if (throwable == null) {
+            return new StackTraceElement[0];
+        }
+        return sanitizeStackTrace(throwable.getStackTrace());
+    }
+
+    private static StackTraceElement[] sanitizeStackTrace(StackTraceElement[] frames) {
+        if (frames == null) {
+            return new StackTraceElement[0];
+        }
+        List<StackTraceElement> clean = new ArrayList<>(frames.length);
+        for (StackTraceElement frame : frames) {
+            if (frame == null) continue;
+            String cls = frame.getClassName();
+            boolean hide = false;
+            if (cls != null) {
+                for (String marker : STACK_MARKERS) {
+                    if (cls.contains(marker)) {
+                        hide = true;
+                        break;
+                    }
+                }
+            }
+            if (!hide) {
+                clean.add(frame);
+            }
+        }
+        return clean.toArray(new StackTraceElement[0]);
+    }
+
+    public static void sanitizeSensorEvent(SensorEvent event) {
+        if (event == null || event.values == null || event.sensor == null) {
+            return;
+        }
+        int type = event.sensor.getType();
+        if (type == Sensor.TYPE_ACCELEROMETER || type == Sensor.TYPE_GRAVITY) {
+            if (event.values.length >= 3) {
+                event.values[0] = 0f;
+                event.values[1] = 0f;
+                event.values[2] = SensorManager.GRAVITY_EARTH;
+            }
+        } else if (type == Sensor.TYPE_GYROSCOPE || type == Sensor.TYPE_LINEAR_ACCELERATION) {
+            if (event.values.length >= 3) {
+                event.values[0] = 0f;
+                event.values[1] = 0f;
+                event.values[2] = 0f;
+            }
+        }
+    }
+
+    public static boolean requestTriggerSensor(SensorManager sm, TriggerEventListener listener, Sensor sensor) {
+        if (sensor != null && sensor.getType() == Sensor.TYPE_SIGNIFICANT_MOTION) {
+            log("Suppressed SensorManager.requestTriggerSensor(TYPE_SIGNIFICANT_MOTION)");
+            return false;
+        }
+        return sm != null && sm.requestTriggerSensor(listener, sensor);
+    }
+
+    public static Display[] getDisplays(DisplayManager dm) {
+        if (dm == null) {
+            return new Display[0];
+        }
+        return filterDefaultDisplays(dm.getDisplays());
+    }
+
+    public static Display[] getDisplays(DisplayManager dm, String category) {
+        if (dm == null) {
+            return new Display[0];
+        }
+        return filterDefaultDisplays(dm.getDisplays(category));
+    }
+
+    public static Display getDisplay(DisplayManager dm, int displayId) {
+        if (displayId != Display.DEFAULT_DISPLAY) {
+            log("Blocked secondary DisplayManager.getDisplay(" + displayId + ")");
+            return null;
+        }
+        return dm != null ? dm.getDisplay(displayId) : null;
+    }
+
+    private static Display[] filterDefaultDisplays(Display[] displays) {
+        if (displays == null || displays.length <= 1) {
+            return displays;
+        }
+        for (Display d : displays) {
+            if (d != null && d.getDisplayId() == Display.DEFAULT_DISPLAY) {
+                return new Display[]{d};
+            }
+        }
+        return new Display[]{displays[0]};
+    }
+
+    public static void onClipboardClear(ClipboardManager cm) {
+        log("Blocked ClipboardManager.clearPrimaryClip()");
+    }
+
+    public static void onClipboardSetPrimaryClip(ClipboardManager cm, ClipData clip) {
+        boolean isEmptyClear = clip == null || clip.getItemCount() == 0;
+        if (!isEmptyClear && clip.getItemCount() == 1) {
+            CharSequence txt = clip.getItemAt(0).getText();
+            if (txt == null || txt.toString().trim().isEmpty()) {
+                isEmptyClear = true;
+            }
+        }
+        if (isEmptyClear) {
+            log("Blocked empty ClipboardManager.setPrimaryClip() wipe");
+            return;
+        }
+        if (cm != null) {
+            cm.setPrimaryClip(clip);
+        }
+    }
+
+    public static Exception softFailTaskException(Object task) {
+        if (task == null) {
+            return null;
+        }
+        try {
+            Method m = task.getClass().getMethod("getException");
+            Object res = m.invoke(task);
+            if (res instanceof Exception) {
+                Exception ex = (Exception) res;
+                String msg = ex.getClass().getName() + " " + ex.getMessage();
+                String lower = msg.toLowerCase();
+                if (lower.contains("integrity") || lower.contains("safetynet") || lower.contains("attest")) {
+                    log("Soft-failed Integrity/SafetyNet exception: " + ex.getClass().getSimpleName());
+                    return null;
+                }
+                return ex;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     public static int getSettingsSystemInt(ContentResolver cr, String name, int def) {
@@ -4431,45 +6227,52 @@ private class JsonCompatibility(
 
 function generateReadme(config: ModuleConfig, pkg: string): string {
   const folderName = config.moduleName.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'PinSpoof';
-  const ver = config.versionName.trim() || '1.2.0';
-  return `# ${config.moduleName} v${ver}
+  const ver = config.versionName.trim() || '1.3.0';
+  return `# ${config.moduleName}
 
 App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundle (\`${folderName}-v${ver}.apk\` / \`${folderName}-v${ver}.mpp\`) targeting **Android 7.0 – Android 16 (API ${config.minSdk}–${config.targetSdk})**:
 
-1. **Disables System App Pinning**: Intercepts \`Activity.startLockTask()\`, \`Activity.stopLockTask()\`, \`ActivityClient\`, and optional Binder \`Stub$Proxy\` calls (with dynamic OEM-safe method scanning) inside the target app's ART process before IPC reaches \`system_server\`.
-2. **Spoofs Pinned State**: Spoofs \`ActivityManager.getLockTaskModeState()\` -> \`LOCK_TASK_MODE_PINNED\` (\`2\`) and \`isInLockTaskMode()\` -> \`true\` in safe **Reactive** mode by default (or optional **Always Pinned**).
-3. **Granular Window, WebView & Lifecycle Stealth**:
-   - **Window Focus Spoofing (Safe Default)**: Drops \`View.dispatchWindowFocusChanged(false)\`, \`ViewTreeObserver\`, \`DecorView\`, \`Activity.performTopResumedActivityChanged(false)\`, safe \`onUserLeaveHint()\`, forces \`hasWindowFocus() -> true\`, and keeps \`ActivityManager.getMyMemoryState()\` at \`IMPORTANCE_FOREGROUND\`.
-   - **WebView Visibility, JS & Pause Stealth (Opt-in)**: Coerces \`WebView.onWindowVisibilityChanged\` to \`View.VISIBLE\`, blocks \`WebView.onPause()\` / \`pauseTimers()\`, and injects DOM stealth (\`document.hidden = false\`, \`document.visibilityState = "visible"\`, \`document.hasFocus = () => true\`, \`visibilitychange\`/\`blur\` suppression) without causing background Chromium GPU crashes on apps that don't need it.
+1. **Disables System App Pinning**: Intercepts \`Activity.startLockTask()\`, \`Activity.stopLockTask()\`, \`ActivityClient\`, and optional Binder \`Stub\$Proxy\` calls (with dynamic OEM-safe method scanning) locally within the target app's ART process without modifying \`system_server\`.
+2. **Emulates Pinned State**: Reports \`ActivityManager.getLockTaskModeState()\` -> \`LOCK_TASK_MODE_PINNED\` (\`2\`) and \`isInLockTaskMode()\` -> \`true\` in safe **Reactive** mode by default (or optional **Always Pinned**), alongside optional \`Settings.System\` (\`lock_to_app_enabled\`) and \`DevicePolicyManager.isLockTaskPermitted()\` overrides.
+3. **Preserves Foreground, WebView & Display State**:
+   - **Window Focus Spoofing (Safe Default)**: Drops \`View.dispatchWindowFocusChanged(false)\`, \`ViewTreeObserver\`, \`DecorView\`, \`Activity.performTopResumedActivityChanged(false)\`, safe \`onUserLeaveHint()\`, maintains \`hasWindowFocus() -> true\`, and keeps \`ActivityManager.getMyMemoryState()\` at \`IMPORTANCE_FOREGROUND\`.
+   - **WebView Visibility, JS & Pause Stealth (Opt-in)**: Forces \`WebView\` visibility \`VISIBLE\`, blocks \`WebView.onPause()\` / \`pauseTimers()\`, and injects DOM stealth (\`document.hidden = false\`, \`document.visibilityState = "visible"\`, \`document.hasFocus = () => true\`, \`visibilitychange\` / \`blur\` suppression).
    - **Lifecycle Suppression (Advanced Opt-in)**: Off by default to prevent \`SurfaceView\` / \`TextureView\` graphics stalls when resuming from Recents; optionally blocks \`onPause()\`, \`onStop()\`, \`Application.ActivityLifecycleCallbacks\`, and \`LifecycleRegistry\` (\`ON_PAUSE\`/\`ON_STOP\`).
-   - **Modern UI & Environment Hooks**: Simulate zeroed pinned \`WindowInsets\` while keeping navigation usable, strip \`FLAG_SECURE\`, hide \`AccessibilityManager\` / overlay checks, and retain \`AudioManager\` focus across notifications.
-4. **In-App Convenience & Morphe Patching**:
-   - **Material 3 Expressive + Material You UI**: Includes one-tap **Light / Balanced / Aggressive** presets, per-app overrides with app icons, **JSON export/import**, and a **Live Hook Event Counter**.
+   - **Display, Media & UI Bypass**: Simulate zeroed pinned \`WindowInsets\`, strip \`FLAG_SECURE\`, expose only \`Display.DEFAULT_DISPLAY\` for virtual/screen-sharing bypass, unblock \`ClipboardManager.clearPrimaryClip()\`, hide \`AccessibilityManager\` / overlay checks, and retain \`AudioManager\` focus.
+4. **Anti-Detection & Integrity Cloaking**:
+   - **Package & Installer Cloaking**: Report \`com.android.vending\` as installer and hide Xposed / LSPosed / Morphe manager packages from \`PackageManager\`.
+   - **Stack Trace Sanitization & Motion Sensors**: Strip hook frames from \`Thread\` / \`Throwable.getStackTrace()\` and clamp accelerometer/gyroscope readings to resting desk values.
+   - **Signature & Play Integrity Handling**: Optional \`PackageInfo.signatures\` / \`SigningInfo\` replacement via Certificate DER Hex and soft-fail clearing on Integrity / SafetyNet \`Task.getException()\`.
+5. **Accessible Anywhere**:
    - **Morphe Patching (No Root / No Xposed)**: All controls are exposed directly as **Morphe Patching Options** inside \`${folderName}-v${ver}.mpp\` (universal patch, works on any APK).
+   - **LSPosed Xposed + Material 3 Expressive UI**: Inline expandable per-app rules & presets (\`Light\`, \`Balanced\`, \`Aggressive\`), JSON export/import, and a tappable **Live Hook Event Counter** & method event log drawer via \`xposedsharedprefs\`.
 
 ## Practical Usage
 
-${config.moduleName} lets you stay in control of multitasking and system navigation without breaking apps that insist on locking the screen or reacting aggressively to brief interruptions:
+${config.moduleName} lets you stay in control of multitasking and system navigation without breaking apps that lock the screen or reset their state during brief interruptions:
 
-- **Keep Android Navigation & Recents Unlocked**: Stop apps from trapping your device in Screen Pinning so the Back button, Recents overview, gesture navigation, Quick Settings, and notifications always remain usable while the app believes pinning succeeded.
-- **Multitask Without Focus-Loss Nagging or Resets**: Open Recents, switch briefly to a calculator/notes/translator app, pull down the notification shade, or open floating/split-screen windows without triggering focus-lost overlays, forced UI lockouts, WebView playback/timer pauses, or state resets.
-- **No \`system_server\` Scoping Required**: Unlike legacy pinning hooks that hook the Android System Framework (\`android\`), ${config.moduleName} hooks purely inside the scoped target app process (or directly inside a Morphe-patched APK without root or LSPosed).
-- **Per-App Presets & Patch-Time Granularity**: Start with the safe **Balanced** preset (\`Reactive\` mode + safe focus spoofing), or apply **Light** / **Aggressive** profiles, export/import per-app JSON configs, and enable advanced WebView/Insets/Lifecycle hooks only where needed.
+- **Keep Android Navigation & Recents Unlocked**: Prevent apps from locking your device into Screen Pinning so the Back button, Recents overview, gesture navigation, Quick Settings, and notifications always remain usable without disrupting the app's internal layout or navigation state.
+- **Multitask Without State Resets or Media Pauses**: Open Recents, pull down the notification shade, check a reference note, reply to a message, or use floating/split-screen windows without triggering unwanted WebView playback/timer pauses, aggressive activity teardowns, clipboard wipes, or full state resets.
+- **No \`system_server\` Scoping Required**: Unlike legacy pinning modules that target the Android System Framework (\`android\`), ${config.moduleName} operates strictly inside the scoped target app process (or directly inside a Morphe-patched APK without root or LSPosed).
+- **Per-App Presets & Patch-Time Granularity**: Leave pinning disabled across all scoped apps with **Reactive** mode (emulates pinned state only after \`startLockTask()\` is invoked) or assign **Light**, **Balanced**, or **Aggressive** profiles per app directly inside the app picker.
 
 ## Option 1: Morphe Patching (No Root / No Xposed)
+
+> **Note:** Morphe re-signs the patched APK. Apps that enforce signature verification can use **Static Package Signature Spoof** with your original certificate DER hex, or use **Option 2 (LSPosed)**.
 
 1. Download the \`${folderName}-morphe-patches\` artifact (\`${folderName}-v${ver}.mpp\`) built by \`.github/workflows/build-apk.yml\`, or build locally in \`morphe-patches/\`:
    \`\`\`bash
    gradle :patches:buildAndroid :patches:generatePatchesList
    \`\`\`
 2. Import \`${folderName}-v${ver}.mpp\` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI**.
-3. Pick any target APK, enable the **${config.moduleName}** universal patch, and open **Patching Options** to configure:
-   - \`Spoof Timing Mode\` (\`reactive\` default vs \`always\`)
-   - \`Disable Pinning (startLockTask / stopLockTask)\` & \`Binder Stub$Proxy Interception\`
-   - \`Spoof ActivityManager Pin State\` & \`Hide Multi-Window & Picture-in-Picture\`
-   - \`Window Focus Spoofing (Safe)\` vs \`WebView Visibility, JS & Pause Stealth\` vs \`Suppress onPause / onStop (Advanced)\`
-   - \`Simulate Pinned Window Insets\`, \`Strip FLAG_SECURE\`, \`Hide Accessibility & Overlay Checks\`, \`Retain Audio Focus\`
-   - \`Spoof Settings.System lock_to_app_enabled\`, \`DevicePolicyManager.isLockTaskPermitted\`, and \`Verbose Logcat Debug Logging\`
+3. Pick any target APK, open **Patching Options** on the **${config.moduleName}** universal patch to configure:
+   - **\`Spoof Timing Mode\`**: \`Reactive (after startLockTask)\` (default) or \`Always Pinned (from launch)\`.
+   - **\`Disable Pinning (startLockTask / stopLockTask)\`** & **\`Binder Stub\$Proxy LockTask Interception\`**.
+   - **\`Spoof ActivityManager Pin State\`** & **\`Hide Multi-Window & Picture-in-Picture\`**.
+   - **\`Window Focus Spoofing (Safe)\`**, **\`WebView Visibility, JS & Pause Stealth\`**, & **\`Suppress onPause / onStop (Advanced)\`**.
+   - **\`Simulate Pinned Window Insets\`**, **\`Strip FLAG_SECURE\`**, **\`Virtual Display & Screen Sharing Bypass\`**, **\`Unblock Clipboard Clear\`**, **\`Hide Accessibility & Overlay Checks\`**, & **\`Retain Audio Focus\`**.
+   - **\`Cloak Packages & Play Store Installer\`**, **\`Sanitize Stack Traces\`**, **\`Spoof Motion Sensors (Stationary)\`**, **\`Static Package Signature Spoof\`** + **\`Original Certificate DER Hex\`**, & **\`Play Integrity / SafetyNet Soft-Fail\`**.
+   - **\`Spoof Settings.System lock_to_app_enabled\`**, **\`Spoof DevicePolicyManager.isLockTaskPermitted\`**, & **\`Verbose Logcat Debug Logging\`**.
 4. Patch and install the modified APK.
 
 ## Option 2: LSPosed Setup
@@ -4477,14 +6280,16 @@ ${config.moduleName} lets you stay in control of multitasking and system navigat
 1. Install \`${folderName}-v${ver}.apk\` (from \`${folderName}-apks\`).
 2. Open **LSPosed Manager** -> **Modules** -> **${config.moduleName}**.
 3. Enable the module and select **only the target apps** you want to affect (keep **System Framework (\`android\`) UNCHECKED**).
-4. Open the **${config.moduleName}** app to pick a preset (**Light**, **Balanced**, **Aggressive**), export/import JSON profiles, view the **Live Hook Event Counter**, or customize per-app toggles, then force-stop and relaunch your target app.
+4. Open **${config.moduleName}**, tap **Select App Override** to expand inline per-app rules/presets (\`Light\` / \`Balanced\` / \`Aggressive\`), import/export JSON configs, or tap any **Live Hook Event Counter** tile to inspect triggered methods, then force-stop and relaunch your target app.
 
-Package ID: \`${pkg}\`
-Entry Class: \`${pkg}.PinSpoofModule\`
+- **Package ID**: \`${pkg}\`
+- **Entry Class**: \`${pkg}.PinSpoofModule\`
 
-## Disclaimer
+## Disclaimer & Support
 
-This project was created with the assistance of Artificial Intelligence. This software is provided **"as-is"**, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. Should you encounter any issues or have suggestions for improvements, you are free to fork this repository and implement your own ideas. Use it responsibly and solely on devices and software where you are authorized to do so.
+This project was created with the assistance of Artificial Intelligence and is licensed under **GPL-3.0**. This software is provided **"as-is"**, without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement.
+
+**No user support is provided.** Do not expect assistance with troubleshooting, app compatibility, or custom configurations—fork the repository and implement your own changes if needed. Use responsibly and solely on devices and software where you are authorized to do so.
 `;
 }
 

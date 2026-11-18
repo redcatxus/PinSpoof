@@ -17,23 +17,23 @@ export function InstallGuide({
   const steps = [
     {
       index: '01.',
-      title: 'Build v1.2.0 Artifacts in CI',
+      title: `Build v${versionName} Artifacts in CI`,
       body: `Push to GitHub and .github/workflows/build-apk.yml compiles both ${mppName} + patches-list.json and ${apkName} (SDK ${targetSdk}).`,
     },
     {
       index: '02.',
       title: 'Patch Any APK via Morphe',
-      body: `Import ${mppName} in Morphe Manager, enable ${moduleName}, and configure Patching Options (Reactive default, split WebView JS stealth, WindowInsets, FLAG_SECURE, and audio focus).`,
+      body: `Import ${mppName} in Morphe Manager, enable ${moduleName}, and configure Patching Options (Reactive default, cloaking, stack/sensor/display bypass, signature DER hex, and integrity soft-fail).`,
     },
     {
       index: '03.',
       title: 'Or Deploy App-Scoped via LSPosed',
-      body: `Install ${apkName}, enable ${moduleName} in LSPosed for target apps only (never System Framework), and pick Light / Balanced / Aggressive presets in the Material You UI.`,
+      body: `Install ${apkName}, enable ${moduleName} in LSPosed for target apps only (never System Framework), and tap any app in Select App Override to expand inline presets and rules.`,
     },
     {
       index: '04.',
-      title: 'Verify Live Event Counters',
-      body: `Confirm pinning blocks and focus masks inside the PinSpoof Live Hook Event Counter card or export/import per-app JSON profiles across devices.`,
+      title: 'Inspect Live Method Event Logs',
+      body: `Tap any tile in the Live Hook Event Counter card to open the filtered method drawer, or export/import per-app JSON profiles across devices.`,
     },
   ];
 
@@ -67,20 +67,20 @@ export function InstallGuide({
 
         <div className="mt-6 rounded-lg border border-slate-800 bg-[#111827] p-5">
           <h3 className="font-display text-sm font-semibold text-slate-200">
-            v1.2.0 Stability &amp; Split Hook Architecture
+            v{versionName} Stability, Cloaking &amp; Split Hook Architecture
           </h3>
           <p className="mt-2 text-xs text-slate-400 leading-relaxed max-w-4xl">
-            By default, {moduleName} v{versionName} uses the <strong className="text-slate-200">Balanced</strong>{' '}
-            profile (<code className="font-mono text-slate-300">spoofTiming=reactive</code>,{' '}
+            By default, {moduleName} v{versionName} uses the{' '}
+            <strong className="text-slate-200">Balanced</strong> profile (
+            <code className="font-mono text-slate-300">spoofTiming=reactive</code>,{' '}
             <code className="font-mono text-slate-300">hideFocusLoss=true</code>,{' '}
             <code className="font-mono text-slate-300">hideWebViewVisibility=false</code>,{' '}
             <code className="font-mono text-slate-300">hideLifecycleLoss=false</code>, and{' '}
             <code className="font-mono text-slate-300">hookBinderProxies=false</code>) so apps
             never skip startup checks, crash WebView GPU processes, or stall{' '}
             <code className="font-mono text-slate-300">SurfaceView</code> graphics on resume. Enable
-            WebView JS stealth, pinned <code className="font-mono text-slate-300">WindowInsets</code>,{' '}
-            <code className="font-mono text-slate-300">FLAG_SECURE</code> stripping, or lifecycle
-            suppression per-app or via Morphe Patching Options when needed.
+            package/stack/sensor cloaking, virtual display &amp; clipboard bypass, signature DER hex
+            spoofing, or Play Integrity soft-fail per-app or via Morphe Patching Options when needed.
           </p>
         </div>
       </div>

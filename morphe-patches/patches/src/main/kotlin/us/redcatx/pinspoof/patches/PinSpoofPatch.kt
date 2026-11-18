@@ -63,7 +63,7 @@ private val SURFACE_VIEW_BASE_TYPES = setOf(
 @Suppress("unused")
 val pinSpoofPatch = bytecodePatch(
     name = "PinSpoof",
-    description = "Disables app pinning (LockTask), spoofs pinned state, and hides focus/Recents loss directly in patched APKs without root or Xposed.",
+    description = "Disables app pinning (LockTask), spoofs pinned state, and applies focus, WebView, display, clipboard, sensor, and anti-detection patches directly in APKs without root or Xposed.",
     default = false,
 ) {
     val spoofTiming by stringOption(
@@ -140,6 +140,20 @@ val pinSpoofPatch = bytecodePatch(
         description = "Clear FLAG_SECURE on Windows and SurfaceViews so screenshots and recordings remain available.",
     )
 
+    val bypassVirtualDisplays by booleanOption(
+        key = "bypassVirtualDisplays",
+        default = false,
+        title = "Virtual Display & Screen Sharing Bypass",
+        description = "Expose only Display.DEFAULT_DISPLAY in DisplayManager and filter secondary display listener callbacks.",
+    )
+
+    val unblockClipboard by booleanOption(
+        key = "unblockClipboard",
+        default = false,
+        title = "Unblock Clipboard Clear",
+        description = "Prevent ClipboardManager.clearPrimaryClip() and empty clip wipes during copy/paste.",
+    )
+
     val hideAccessibilityAndOverlays by booleanOption(
         key = "hideAccessibilityAndOverlays",
         default = false,
@@ -152,6 +166,48 @@ val pinSpoofPatch = bytecodePatch(
         default = false,
         title = "Retain Audio Focus",
         description = "Suppress negative AudioManager.OnAudioFocusChangeListener notifications when interruptions occur.",
+    )
+
+    val cloakPackagesAndInstaller by booleanOption(
+        key = "cloakPackagesAndInstaller",
+        default = false,
+        title = "Cloak Packages & Play Store Installer",
+        description = "Report com.android.vending as installer and hide Xposed/LSPosed/Morphe packages from PackageManager.",
+    )
+
+    val sanitizeStackTraces by booleanOption(
+        key = "sanitizeStackTraces",
+        default = false,
+        title = "Sanitize Stack Traces",
+        description = "Filter Xposed, LSPHooker, EdHooker, and PinSpoof frames from Thread/Throwable.getStackTrace().",
+    )
+
+    val spoofMotionSensors by booleanOption(
+        key = "spoofMotionSensors",
+        default = false,
+        title = "Spoof Motion Sensors (Stationary)",
+        description = "Clamp accelerometer, gyroscope, and significant-motion sensors to resting desk values.",
+    )
+
+    val spoofPackageSignature by booleanOption(
+        key = "spoofPackageSignature",
+        default = false,
+        title = "Static Package Signature Spoof",
+        description = "Replace PackageInfo.signatures returned by PackageManager.getPackageInfo() with Original Certificate DER Hex.",
+    )
+
+    val originalSignatureHex by stringOption(
+        key = "originalSignatureHex",
+        default = "",
+        title = "Original Certificate DER Hex",
+        description = "Optional hex-encoded X.509 DER certificate used when Static Package Signature Spoof is enabled.",
+    )
+
+    val softFailIntegrityChecks by booleanOption(
+        key = "softFailIntegrityChecks",
+        default = false,
+        title = "Play Integrity / SafetyNet Soft-Fail",
+        description = "Clear local Integrity / SafetyNet / attestation exceptions on Task.getException() checks.",
     )
 
     val hookSettingsLockToApp by booleanOption(
@@ -185,6 +241,30 @@ val pinSpoofPatch = bytecodePatch(
         Fingerprint(definingClass = EXTENSION_CLASS, name = "debugLogging")
             .method
             .returnEarly(debugLogging == true)
+        Fingerprint(definingClass = EXTENSION_CLASS, name = "cloakPackagesEnabled")
+            .method
+            .returnEarly(cloakPackagesAndInstaller == true)
+        Fingerprint(definingClass = EXTENSION_CLASS, name = "spoofSignatureEnabled")
+            .method
+            .returnEarly(spoofPackageSignature == true)
+
+        val escapedSigHex = (originalSignatureHex ?: "")
+            .replace("\\", "")
+            .replace("\"", "")
+            .replace(":", "")
+            .replace(" ", "")
+            .trim()
+        if (escapedSigHex.isNotEmpty()) {
+            Fingerprint(definingClass = EXTENSION_CLASS, name = "originalSignatureHex")
+                .method
+                .addInstructions(
+                    0,
+                    """
+                        const-string v0, "$escapedSigHex"
+                        return-object v0
+                    """.trimIndent(),
+                )
+        }
 
         if (hookActivityLockTask == true) {
             rewriteInstanceCalls(
@@ -337,6 +417,47 @@ val pinSpoofPatch = bytecodePatch(
             )
         }
 
+        if (bypassVirtualDisplays == true) {
+            rewriteInstanceCalls(
+                methodName = "getDisplays",
+                parameters = emptyList(),
+                returnType = "[Landroid/view/Display;",
+                matchesReceiver = { it == "Landroid/hardware/display/DisplayManager;" },
+                targetMethod = "$EXTENSION_CLASS->getDisplays(Landroid/hardware/display/DisplayManager;)[Landroid/view/Display;",
+            )
+            rewriteInstanceCalls(
+                methodName = "getDisplays",
+                parameters = listOf("Ljava/lang/String;"),
+                returnType = "[Landroid/view/Display;",
+                matchesReceiver = { it == "Landroid/hardware/display/DisplayManager;" },
+                targetMethod = "$EXTENSION_CLASS->getDisplays(Landroid/hardware/display/DisplayManager;Ljava/lang/String;)[Landroid/view/Display;",
+            )
+            rewriteInstanceCalls(
+                methodName = "getDisplay",
+                parameters = listOf("I"),
+                returnType = "Landroid/view/Display;",
+                matchesReceiver = { it == "Landroid/hardware/display/DisplayManager;" },
+                targetMethod = "$EXTENSION_CLASS->getDisplay(Landroid/hardware/display/DisplayManager;I)Landroid/view/Display;",
+            )
+        }
+
+        if (unblockClipboard == true) {
+            rewriteInstanceCalls(
+                methodName = "clearPrimaryClip",
+                parameters = emptyList(),
+                returnType = "V",
+                matchesReceiver = { it == "Landroid/content/ClipboardManager;" },
+                targetMethod = "$EXTENSION_CLASS->onClipboardClear(Landroid/content/ClipboardManager;)V",
+            )
+            rewriteInstanceCalls(
+                methodName = "setPrimaryClip",
+                parameters = listOf("Landroid/content/ClipData;"),
+                returnType = "V",
+                matchesReceiver = { it == "Landroid/content/ClipboardManager;" },
+                targetMethod = "$EXTENSION_CLASS->onClipboardSetPrimaryClip(Landroid/content/ClipboardManager;Landroid/content/ClipData;)V",
+            )
+        }
+
         if (hideAccessibilityAndOverlays == true) {
             methodCall(
                 smali = "Landroid/view/accessibility/AccessibilityManager;->getEnabledAccessibilityServiceList(I)Ljava/util/List;"
@@ -356,6 +477,99 @@ val pinSpoofPatch = bytecodePatch(
                         index,
                         "$EXTENSION_CLASS->canDrawOverlays(Landroid/content/Context;)Z",
                     )
+                }
+            }
+        }
+
+        if (cloakPackagesAndInstaller == true) {
+            rewriteInstanceCalls(
+                methodName = "getInstallerPackageName",
+                parameters = listOf("Ljava/lang/String;"),
+                returnType = "Ljava/lang/String;",
+                matchesReceiver = { it == "Landroid/content/pm/PackageManager;" },
+                targetMethod = "$EXTENSION_CLASS->getInstallerPackageName(Landroid/content/pm/PackageManager;Ljava/lang/String;)Ljava/lang/String;",
+            )
+            rewriteInstanceCalls(
+                methodName = "getInstalledPackages",
+                parameters = listOf("I"),
+                returnType = "Ljava/util/List;",
+                matchesReceiver = { it == "Landroid/content/pm/PackageManager;" },
+                targetMethod = "$EXTENSION_CLASS->getInstalledPackages(Landroid/content/pm/PackageManager;I)Ljava/util/List;",
+            )
+            rewriteInstanceCalls(
+                methodName = "getInstalledApplications",
+                parameters = listOf("I"),
+                returnType = "Ljava/util/List;",
+                matchesReceiver = { it == "Landroid/content/pm/PackageManager;" },
+                targetMethod = "$EXTENSION_CLASS->getInstalledApplications(Landroid/content/pm/PackageManager;I)Ljava/util/List;",
+            )
+            rewriteInstanceCalls(
+                methodName = "queryIntentActivities",
+                parameters = listOf("Landroid/content/Intent;", "I"),
+                returnType = "Ljava/util/List;",
+                matchesReceiver = { it == "Landroid/content/pm/PackageManager;" },
+                targetMethod = "$EXTENSION_CLASS->queryIntentActivities(Landroid/content/pm/PackageManager;Landroid/content/Intent;I)Ljava/util/List;",
+            )
+        }
+
+        if (cloakPackagesAndInstaller == true || spoofPackageSignature == true) {
+            rewriteInstanceCalls(
+                methodName = "getPackageInfo",
+                parameters = listOf("Ljava/lang/String;", "I"),
+                returnType = "Landroid/content/pm/PackageInfo;",
+                matchesReceiver = { it == "Landroid/content/pm/PackageManager;" },
+                targetMethod = "$EXTENSION_CLASS->getPackageInfo(Landroid/content/pm/PackageManager;Ljava/lang/String;I)Landroid/content/pm/PackageInfo;",
+            )
+        }
+
+        if (sanitizeStackTraces == true) {
+            methodCall(
+                smali = "Ljava/lang/Thread;->getStackTrace()[Ljava/lang/StackTraceElement;"
+            ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                    replaceCallAt(
+                        index,
+                        "$EXTENSION_CLASS->getThreadStackTrace(Ljava/lang/Thread;)[Ljava/lang/StackTraceElement;",
+                    )
+                }
+            }
+            methodCall(
+                smali = "Ljava/lang/Throwable;->getStackTrace()[Ljava/lang/StackTraceElement;"
+            ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                    replaceCallAt(
+                        index,
+                        "$EXTENSION_CLASS->getThrowableStackTrace(Ljava/lang/Throwable;)[Ljava/lang/StackTraceElement;",
+                    )
+                }
+            }
+        }
+
+        if (spoofMotionSensors == true) {
+            methodCall(
+                smali = "Landroid/hardware/SensorManager;->requestTriggerSensor(Landroid/hardware/TriggerEventListener;Landroid/hardware/Sensor;)Z"
+            ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                    replaceCallAt(
+                        index,
+                        "$EXTENSION_CLASS->requestTriggerSensor(Landroid/hardware/SensorManager;Landroid/hardware/TriggerEventListener;Landroid/hardware/Sensor;)Z",
+                    )
+                }
+            }
+        }
+
+        if (softFailIntegrityChecks == true) {
+            listOf(
+                "Lcom/google/android/gms/tasks/Task;->getException()Ljava/lang/Exception;",
+                "Lcom/google/android/play/core/tasks/Task;->getException()Ljava/lang/Exception;",
+            ).forEach { sig ->
+                methodCall(smali = sig).matchAllMethodIndicesForEach(requireMatches = false) { index ->
+                    if (!definingClass.startsWith(EXTENSION_PREFIX)) {
+                        replaceCallAt(
+                            index,
+                            "$EXTENSION_CLASS->softFailTaskException(Ljava/lang/Object;)Ljava/lang/Exception;",
+                        )
+                    }
                 }
             }
         }
@@ -399,13 +613,17 @@ val pinSpoofPatch = bytecodePatch(
         if (hideFocusLoss == true ||
             hideWebViewVisibility == true ||
             hideLifecycleLoss == true ||
-            retainAudioFocus == true
+            retainAudioFocus == true ||
+            spoofMotionSensors == true ||
+            bypassVirtualDisplays == true
         ) {
             patchAppSubclassOverrides(
                 hideFocus = hideFocusLoss == true,
                 hideWebView = hideWebViewVisibility == true,
                 hideLifecycle = hideLifecycleLoss == true,
                 retainAudio = retainAudioFocus == true,
+                spoofSensors = spoofMotionSensors == true,
+                bypassDisplays = bypassVirtualDisplays == true,
             )
         }
     }
@@ -511,6 +729,8 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
     hideWebView: Boolean,
     hideLifecycle: Boolean,
     retainAudio: Boolean,
+    spoofSensors: Boolean,
+    bypassDisplays: Boolean,
 ) {
     val activityTargets = mutableListOf<ClassDef>()
     val fragmentTargets = mutableListOf<ClassDef>()
@@ -519,6 +739,8 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
     val lifecycleCallbackTargets = mutableListOf<ClassDef>()
     val focusListenerTargets = mutableListOf<ClassDef>()
     val audioListenerTargets = mutableListOf<ClassDef>()
+    val sensorListenerTargets = mutableListOf<ClassDef>()
+    val displayListenerTargets = mutableListOf<ClassDef>()
 
     classDefForEach { classDef ->
         val type = classDef.type
@@ -597,6 +819,26 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
                     m.returnType == "V"
             }
             if (hasAudio) audioListenerTargets += classDef
+        }
+
+        if (spoofSensors && "Landroid/hardware/SensorEventListener;" in classDef.interfaces) {
+            val hasSensor = classDef.methods.any { m ->
+                m.implementation != null &&
+                    m.name == "onSensorChanged" &&
+                    m.parameterTypes == listOf("Landroid/hardware/SensorEvent;") &&
+                    m.returnType == "V"
+            }
+            if (hasSensor) sensorListenerTargets += classDef
+        }
+
+        if (bypassDisplays && "Landroid/hardware/display/DisplayManager\$DisplayListener;" in classDef.interfaces) {
+            val hasDisplayCb = classDef.methods.any { m ->
+                m.implementation != null &&
+                    (m.name == "onDisplayAdded" || m.name == "onDisplayChanged") &&
+                    m.parameterTypes == listOf("I") &&
+                    m.returnType == "V"
+            }
+            if (hasDisplayCb) displayListenerTargets += classDef
         }
     }
 
@@ -729,6 +971,35 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
         }
     }
 
+    sensorListenerTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if (method.name == "onSensorChanged" &&
+                method.parameterTypes == listOf("Landroid/hardware/SensorEvent;") &&
+                method.returnType == "V"
+            ) {
+                method.addInstructions(
+                    0,
+                    "invoke-static/range { p1 .. p1 }, $EXTENSION_CLASS->sanitizeSensorEvent(Landroid/hardware/SensorEvent;)V",
+                )
+            }
+        }
+    }
+
+    displayListenerTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if ((method.name == "onDisplayAdded" || method.name == "onDisplayChanged") &&
+                method.parameterTypes == listOf("I") &&
+                method.returnType == "V"
+            ) {
+                skipNonDefaultDisplayCallback(method)
+            }
+        }
+    }
+
     if (hideLifecycle) {
         classDefByOrNull("Landroidx/lifecycle/LifecycleRegistry;")?.let { registryClass ->
             val mutable = mutableClassDefBy(registryClass)
@@ -761,6 +1032,18 @@ private fun skipWhenBooleanParamFalse(method: MutableMethod) {
             if-nez p1, :pinspoof_keep
             return-void
             :pinspoof_keep
+            nop
+        """.trimIndent(),
+    )
+}
+
+private fun skipNonDefaultDisplayCallback(method: MutableMethod) {
+    method.addInstructions(
+        0,
+        """
+            if-eqz p1, :pinspoof_default
+            return-void
+            :pinspoof_default
             nop
         """.trimIndent(),
     )

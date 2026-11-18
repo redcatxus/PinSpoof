@@ -14,11 +14,14 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -36,25 +39,36 @@ import androidx.compose.material.icons.rounded.Analytics
 import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.AspectRatio
+import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.LayersClear
 import androidx.compose.material.icons.rounded.PauseCircleOutline
 import androidx.compose.material.icons.rounded.PhonelinkLock
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.ScreenRotation
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.Upload
+import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -79,6 +93,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -97,10 +112,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import java.text.DateFormat
+import java.util.Date
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import us.redcatx.pinspoof.prefs.GranularHookState
+import us.redcatx.pinspoof.prefs.HookLogEntry
 import us.redcatx.pinspoof.prefs.HookPreset
 import us.redcatx.pinspoof.prefs.HookStats
 import us.redcatx.pinspoof.prefs.PrefsManager
@@ -182,10 +203,15 @@ private fun AppIconView(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    ExperimentalMaterial3ExpressiveApi::class,
+    ExperimentalLayoutApi::class
+)
 @Composable
 private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
@@ -197,14 +223,28 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         mutableStateOf(selectedPkg?.let { prefsManager.hasPerAppOverride(it) } ?: false)
     }
     var stats by remember(selectedPkg) { mutableStateOf(prefsManager.loadStats(selectedPkg)) }
+    var eventLog by remember(selectedPkg) { mutableStateOf(prefsManager.loadEventLog(selectedPkg)) }
     var showAppPicker by remember { mutableStateOf(false) }
+    var showEventLogSheet by remember { mutableStateOf(false) }
+    var eventLogFilter by remember { mutableStateOf("all") }
 
-    DisposableEffect(prefsManager, selectedPkg) {
+    DisposableEffect(prefsManager, selectedPkg, lifecycleOwner) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
             stats = prefsManager.loadStats(selectedPkg)
+            eventLog = prefsManager.loadEventLog(selectedPkg)
+        }
+        val lifecycleObserver = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                stats = prefsManager.loadStats(selectedPkg)
+                eventLog = prefsManager.loadEventLog(selectedPkg)
+            }
         }
         prefsManager.registerStatsListener(listener)
-        onDispose { prefsManager.unregisterStatsListener(listener) }
+        lifecycleOwner.lifecycle.addObserver(lifecycleObserver)
+        onDispose {
+            prefsManager.unregisterStatsListener(listener)
+            lifecycleOwner.lifecycle.removeObserver(lifecycleObserver)
+        }
     }
 
     fun updateState(transform: (GranularHookState) -> GranularHookState) {
@@ -257,7 +297,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 title = {
                     Column {
                         Text(
-                            text = "${HookConfig.MODULE_TAG} v1.2.0",
+                            text = HookConfig.MODULE_TAG,
                             style = MaterialTheme.typography.headlineMediumEmphasized,
                             fontWeight = FontWeight.Bold
                         )
@@ -286,12 +326,12 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
             ),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Expressive Scope Selector Card + JSON Export/Import
+            // Material You Cohesive Scope Selector Card + JSON Export/Import
             item {
                 ElevatedCard(
                     shape = RoundedCornerShape(28.dp),
                     colors = CardDefaults.elevatedCardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f)
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerLow
                     )
                 ) {
                     Column(
@@ -316,13 +356,13 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                     modifier = Modifier
                                         .size(44.dp)
                                         .clip(RoundedCornerShape(14.dp))
-                                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                                        .background(MaterialTheme.colorScheme.secondaryContainer),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Icon(
                                         imageVector = Icons.Rounded.Apps,
                                         contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.primary
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer
                                     )
                                 }
                             }
@@ -353,7 +393,11 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         ) {
                             FilledTonalButton(
                                 onClick = { showAppPicker = true },
-                                shape = RoundedCornerShape(16.dp)
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.filledTonalButtonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
                             ) {
                                 Icon(
                                     imageVector = Icons.Rounded.Tune,
@@ -367,7 +411,6 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             if (selectedPkg != null) {
                                 TextButton(
                                     onClick = {
-                                        selectedPkg?.let { prefsManager.setPerAppOverride(it, false) }
                                         selectedPkg = null
                                         selectedLabel = "Global Defaults"
                                     }
@@ -379,14 +422,18 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
                             OutlinedButton(
                                 onClick = {
                                     val base = selectedPkg ?: "global"
                                     exportLauncher.launch("pinspoof-$base.json")
                                 },
-                                shape = RoundedCornerShape(14.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onSurface
+                                ),
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Rounded.Upload, null, modifier = Modifier.size(16.dp))
@@ -395,7 +442,11 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             }
                             OutlinedButton(
                                 onClick = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
-                                shape = RoundedCornerShape(14.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onSurface
+                                ),
                                 modifier = Modifier.weight(1f)
                             ) {
                                 Icon(Icons.Rounded.Download, null, modifier = Modifier.size(16.dp))
@@ -411,7 +462,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 horizontalArrangement = Arrangement.SpaceBetween
                             ) {
                                 Text(
-                                    text = "Custom override active for this app",
+                                    text = "Custom rule saved for this app",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -431,7 +482,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
             }
 
-            // Live Hook Event Counter Card
+            // Live Hook Event Counter Card (tappable tiles open Live Hook Event Log drawer)
             item {
                 ElevatedCard(shape = RoundedCornerShape(28.dp)) {
                     Column(
@@ -443,40 +494,48 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(10.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Rounded.Analytics,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary
+                            Icon(
+                                imageVector = Icons.Rounded.Analytics,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Live Hook Event Counter",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
-                                Column {
-                                    Text(
-                                        text = "Live Hook Event Counter",
-                                        style = MaterialTheme.typography.titleMedium,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    Text(
-                                        text = if (selectedPkg == null) "All scoped apps combined" else selectedLabel,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
+                                Text(
+                                    text = if (selectedPkg == null) {
+                                        "Tap a tile to inspect triggered hooks · ${stats.cloakBypassed} cloak events"
+                                    } else {
+                                        "$selectedLabel · Tap a tile for method log"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
                             }
-                            Row {
-                                IconButton(onClick = { stats = prefsManager.loadStats(selectedPkg) }) {
-                                    Icon(Icons.Rounded.Refresh, contentDescription = "Refresh counts")
-                                }
-                                TextButton(onClick = {
+                            IconButton(
+                                onClick = {
                                     prefsManager.resetStats(selectedPkg)
                                     stats = HookStats()
-                                }) {
-                                    Text("Reset")
+                                    eventLog = prefsManager.loadEventLog(selectedPkg)
+                                    scope.launch {
+                                        snackbarHostState.showSnackbar("Reset event counters")
+                                    }
                                 }
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Refresh,
+                                    contentDescription = "Reset event counters",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
                             }
                         }
 
@@ -484,10 +543,42 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            StatTile("Pinning", stats.pinBlocked, Modifier.weight(1f))
-                            StatTile("Focus", stats.focusHidden, Modifier.weight(1f))
-                            StatTile("WebView", stats.webviewSpoofed, Modifier.weight(1f))
-                            StatTile("Lifecycle", stats.lifecycleHidden, Modifier.weight(1f))
+                            StatTile(
+                                label = "Pinning",
+                                count = stats.pinBlocked,
+                                onClick = {
+                                    eventLogFilter = "pin"
+                                    showEventLogSheet = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            StatTile(
+                                label = "Focus",
+                                count = stats.focusHidden,
+                                onClick = {
+                                    eventLogFilter = "focus"
+                                    showEventLogSheet = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            StatTile(
+                                label = "WebView",
+                                count = stats.webviewSpoofed,
+                                onClick = {
+                                    eventLogFilter = "webview"
+                                    showEventLogSheet = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
+                            StatTile(
+                                label = "Lifecycle",
+                                count = stats.lifecycleHidden,
+                                onClick = {
+                                    eventLogFilter = "lifecycle"
+                                    showEventLogSheet = true
+                                },
+                                modifier = Modifier.weight(1f)
+                            )
                         }
                     }
                 }
@@ -613,7 +704,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
             }
 
-            // Modern UI, Window Insets & Environment Stealth Card
+            // Expanded Display, Clipboard, Insets & Media Bypass Card
             item {
                 ElevatedCard(shape = RoundedCornerShape(28.dp)) {
                     Column(
@@ -623,7 +714,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         Text(
-                            text = "Window, Insets & Environment Stealth",
+                            text = "Display, Media & UI Bypass",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -645,6 +736,22 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         ExpressiveToggleRow(
+                            icon = Icons.Rounded.Cast,
+                            title = "Virtual Display & Casting Bypass",
+                            subtitle = "Expose only Display.DEFAULT_DISPLAY in DisplayManager and filter external display callbacks",
+                            checked = hookState.bypassVirtualDisplays,
+                            onCheckedChange = { v -> updateState { it.copy(bypassVirtualDisplays = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.ContentPaste,
+                            title = "Unblock Clipboard Clear",
+                            subtitle = "Suppress ClipboardManager.clearPrimaryClip() and blank clip wipes inside scoped apps",
+                            checked = hookState.unblockClipboard,
+                            onCheckedChange = { v -> updateState { it.copy(unblockClipboard = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
                             icon = Icons.Rounded.AccessibilityNew,
                             title = "Hide Accessibility & Overlay Checks",
                             subtitle = "Return empty AccessibilityManager service list and Settings.canDrawOverlays() = false",
@@ -658,6 +765,76 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             subtitle = "Suppress negative OnAudioFocusChangeListener events when notifications play",
                             checked = hookState.retainAudioFocus,
                             onCheckedChange = { v -> updateState { it.copy(retainAudioFocus = v) } }
+                        )
+                    }
+                }
+            }
+
+            // Deeper Anti-Detection, Sensors, Signature & Integrity Cloaking Card
+            item {
+                ElevatedCard(shape = RoundedCornerShape(28.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Text(
+                            text = "Anti-Detection & Integrity Cloaking",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.Security,
+                            title = "Cloak Packages & Play Installer",
+                            subtitle = "Report com.android.vending as installer and hide Xposed / LSPosed / Morphe packages",
+                            checked = hookState.cloakPackagesInstaller,
+                            onCheckedChange = { v -> updateState { it.copy(cloakPackagesInstaller = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.Code,
+                            title = "Sanitize Stack Traces",
+                            subtitle = "Strip Xposed, LSPHooker, EdHooker, and PinSpoof frames from Thread/Throwable stack traces",
+                            checked = hookState.sanitizeStackTraces,
+                            onCheckedChange = { v -> updateState { it.copy(sanitizeStackTraces = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.ScreenRotation,
+                            title = "Spoof Motion Sensors (Stationary)",
+                            subtitle = "Clamp accelerometer, gyroscope, and significant-motion sensors to resting desk readings",
+                            checked = hookState.spoofMotionSensors,
+                            onCheckedChange = { v -> updateState { it.copy(spoofMotionSensors = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.Fingerprint,
+                            title = "Spoof Package Signature",
+                            subtitle = "Return original signing certificate bytes on PackageInfo.signatures / SigningInfo queries",
+                            checked = hookState.spoofPackageSignature,
+                            onCheckedChange = { v -> updateState { it.copy(spoofPackageSignature = v) } }
+                        )
+                        AnimatedVisibility(visible = hookState.spoofPackageSignature) {
+                            OutlinedTextField(
+                                value = hookState.spoofSignatureHex,
+                                onValueChange = { hex -> updateState { it.copy(spoofSignatureHex = hex) } },
+                                label = { Text("Original Certificate DER Hex (optional)") },
+                                placeholder = { Text("3082...") },
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                shape = RoundedCornerShape(16.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.VerifiedUser,
+                            title = "Play Integrity / SafetyNet Soft-Fail",
+                            subtitle = "Clear local Integrity / attestation Task exceptions to prevent hard client crashes",
+                            checked = hookState.softFailIntegrity,
+                            onCheckedChange = { v -> updateState { it.copy(softFailIntegrity = v) } }
                         )
                     }
                 }
@@ -726,9 +903,14 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         }
     }
 
+    // Inline Expandable App Rules + Per-App Presets Sheet
     if (showAppPicker) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         var query by remember { mutableStateOf("") }
+        var expandedPkg by remember { mutableStateOf<String?>(selectedPkg) }
+        val appStatesMap = remember { mutableStateMapOf<String, GranularHookState>() }
+        val overrideMap = remember { mutableStateMapOf<String, Boolean>() }
+
         val installedApps = remember {
             val pm = context.packageManager
             pm.getInstalledApplications(PackageManager.GET_META_DATA)
@@ -739,41 +921,50 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0
                 }
                 .map {
+                    val hasCustom = prefsManager.hasPerAppOverride(it.packageName)
+                    overrideMap[it.packageName] = hasCustom
                     InstalledAppItem(
                         label = pm.getApplicationLabel(it).toString(),
                         packageName = it.packageName,
-                        hasOverride = prefsManager.hasPerAppOverride(it.packageName)
+                        hasOverride = hasCustom
                     )
                 }
                 .sortedWith(compareByDescending<InstalledAppItem> { it.hasOverride }.thenBy { it.label })
                 .toList()
         }
 
-        val filtered = remember(query, installedApps) {
-            if (query.isBlank()) installedApps
+        val filtered = remember(query, installedApps, overrideMap.toMap()) {
+            val baseList = if (query.isBlank()) installedApps
             else installedApps.filter {
                 it.label.contains(query, ignoreCase = true) ||
                     it.packageName.contains(query, ignoreCase = true)
             }
+            baseList.sortedWith(
+                compareByDescending<InstalledAppItem> { overrideMap[it.packageName] == true }
+                    .thenBy { it.label }
+            )
         }
 
         ModalBottomSheet(
             onDismissRequest = { showAppPicker = false },
             sheetState = sheetState
         ) {
-            Column(
-                modifier = Modifier.fillMaxWidth()
-            ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 20.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
                         text = "Select App for Granular Override",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = "Tap any app to expand inline presets and save individual rules",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     OutlinedTextField(
                         value = query,
@@ -796,70 +987,219 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(420.dp),
+                        .height(460.dp),
                     contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filtered, key = { it.packageName }) { app ->
+                        val isExpanded = expandedPkg == app.packageName
+                        val isCustom = overrideMap[app.packageName] == true
+                        val appState = appStatesMap.getOrPut(app.packageName) {
+                            prefsManager.loadState(app.packageName)
+                        }
+
+                        fun saveAppRule(next: GranularHookState) {
+                            appStatesMap[app.packageName] = next
+                            overrideMap[app.packageName] = true
+                            prefsManager.saveState(app.packageName, next)
+                            if (selectedPkg == app.packageName) {
+                                hookState = next
+                                hasOverride = true
+                            }
+                        }
+
                         Surface(
                             onClick = {
-                                selectedPkg = app.packageName
-                                selectedLabel = app.label
-                                showAppPicker = false
+                                expandedPkg = if (isExpanded) null else app.packageName
                             },
                             shape = RoundedCornerShape(20.dp),
-                            color = if (app.hasOverride) {
-                                MaterialTheme.colorScheme.secondaryContainer
+                            color = if (isCustom) {
+                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f)
                             } else {
                                 MaterialTheme.colorScheme.surfaceContainerHigh
                             }
                         ) {
-                            Row(
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                    .padding(horizontal = 16.dp, vertical = 14.dp)
                             ) {
-                                AppIconView(
-                                    packageName = app.packageName,
-                                    contentDescription = app.label,
-                                    size = 44.dp
-                                )
-
-                                Column(
-                                    modifier = Modifier.weight(1f),
-                                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(14.dp)
                                 ) {
-                                    Text(
-                                        text = app.label,
-                                        style = MaterialTheme.typography.bodyLarge,
-                                        fontWeight = FontWeight.Medium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                    AppIconView(
+                                        packageName = app.packageName,
+                                        contentDescription = app.label,
+                                        size = 44.dp
                                     )
-                                    Text(
-                                        text = app.packageName,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(2.dp)
+                                    ) {
+                                        Text(
+                                            text = app.label,
+                                            style = MaterialTheme.typography.bodyLarge,
+                                            fontWeight = FontWeight.Medium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = app.packageName,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+
+                                    if (isCustom) {
+                                        val presetTag = appState.matchingPreset()?.label ?: "Custom"
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
+                                        ) {
+                                            Text(
+                                                text = presetTag,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                            )
+                                        }
+                                    }
+
+                                    Icon(
+                                        imageVector = if (isExpanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                                        contentDescription = if (isExpanded) "Collapse rules" else "Expand rules",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
                                 }
 
-                                if (app.hasOverride) {
-                                    Surface(
-                                        shape = RoundedCornerShape(10.dp),
-                                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                AnimatedVisibility(visible = isExpanded) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(top = 14.dp),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp)
                                     ) {
-                                        Text(
-                                            text = "Custom",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.SemiBold,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
+                                        HorizontalDivider(
+                                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
                                         )
+
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.SpaceBetween
+                                        ) {
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = "Save Individual App Rule",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    fontWeight = FontWeight.Medium
+                                                )
+                                                Text(
+                                                    text = if (isCustom) "Uses independent per-app profile" else "Currently inherits Global Defaults",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                            ExpressiveSwitch(
+                                                checked = isCustom,
+                                                onCheckedChange = { enabled ->
+                                                    overrideMap[app.packageName] = enabled
+                                                    prefsManager.setPerAppOverride(app.packageName, enabled)
+                                                    val reloaded = prefsManager.loadState(if (enabled) app.packageName else null)
+                                                    appStatesMap[app.packageName] = reloaded
+                                                    if (enabled) {
+                                                        prefsManager.saveState(app.packageName, reloaded)
+                                                    }
+                                                    if (selectedPkg == app.packageName) {
+                                                        hasOverride = enabled
+                                                        hookState = reloaded
+                                                    }
+                                                }
+                                            )
+                                        }
+
+                                        Text(
+                                            text = "Per-App Preset Profile",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                                            HookPreset.entries.forEachIndexed { idx, preset ->
+                                                val presetSelected = isCustom && appState == appState.withPreset(preset)
+                                                SegmentedButton(
+                                                    selected = presetSelected,
+                                                    onClick = { saveAppRule(appState.withPreset(preset)) },
+                                                    shape = SegmentedButtonDefaults.itemShape(
+                                                        index = idx,
+                                                        count = HookPreset.entries.size
+                                                    )
+                                                ) {
+                                                    Text(preset.label, maxLines = 1)
+                                                }
+                                            }
+                                        }
+
+                                        InlineAppRuleSwitch(
+                                            title = "Disable Pinning & Spoof Pinned",
+                                            checked = appState.masterEnabled,
+                                            onCheckedChange = { v -> saveAppRule(appState.copy(masterEnabled = v)) }
+                                        )
+                                        InlineAppRuleSwitch(
+                                            title = "Window Focus Spoofing (Safe)",
+                                            checked = appState.hideFocusLoss,
+                                            onCheckedChange = { v -> saveAppRule(appState.copy(hideFocusLoss = v)) }
+                                        )
+                                        InlineAppRuleSwitch(
+                                            title = "WebView JS & Visibility Stealth",
+                                            checked = appState.hideWebViewVisibility,
+                                            onCheckedChange = { v -> saveAppRule(appState.copy(hideWebViewVisibility = v)) }
+                                        )
+                                        InlineAppRuleSwitch(
+                                            title = "Suppress onPause / onStop",
+                                            checked = appState.hideLifecycleLoss,
+                                            onCheckedChange = { v -> saveAppRule(appState.copy(hideLifecycleLoss = v)) }
+                                        )
+                                        InlineAppRuleSwitch(
+                                            title = "Strip FLAG_SECURE",
+                                            checked = appState.stripFlagSecure,
+                                            onCheckedChange = { v -> saveAppRule(appState.copy(stripFlagSecure = v)) }
+                                        )
+                                        InlineAppRuleSwitch(
+                                            title = "Cloak Packages & Stack Traces",
+                                            checked = appState.cloakPackagesInstaller || appState.sanitizeStackTraces,
+                                            onCheckedChange = { v ->
+                                                saveAppRule(
+                                                    appState.copy(
+                                                        cloakPackagesInstaller = v,
+                                                        sanitizeStackTraces = v
+                                                    )
+                                                )
+                                            }
+                                        )
+
+                                        FilledTonalButton(
+                                            onClick = {
+                                                if (!isCustom) {
+                                                    saveAppRule(appState)
+                                                }
+                                                selectedPkg = app.packageName
+                                                selectedLabel = app.label
+                                                hookState = prefsManager.loadState(app.packageName)
+                                                hasOverride = true
+                                                showAppPicker = false
+                                            },
+                                            shape = RoundedCornerShape(14.dp),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text("Open All Controls & JSON")
+                                        }
                                     }
                                 }
                             }
@@ -870,21 +1210,125 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
             }
         }
     }
+
+    // Live Hook Event Log Drawer (opened by tapping any StatTile)
+    if (showEventLogSheet) {
+        val logSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val filterChips = listOf(
+            "all" to "All",
+            "pin" to "Pinning",
+            "focus" to "Focus",
+            "webview" to "WebView",
+            "lifecycle" to "Lifecycle",
+            "cloak" to "Cloaking"
+        )
+        val filteredEntries = remember(eventLog, eventLogFilter) {
+            if (eventLogFilter == "all") eventLog
+            else eventLog.filter { it.category == eventLogFilter }
+        }
+        val timeFmt = remember { DateFormat.getTimeInstance(DateFormat.MEDIUM) }
+
+        ModalBottomSheet(
+            onDismissRequest = { showEventLogSheet = false },
+            sheetState = logSheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Live Hook Event Log",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = selectedPkg ?: "All scoped apps",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            prefsManager.resetStats(selectedPkg)
+                            stats = HookStats()
+                            eventLog = prefsManager.loadEventLog(selectedPkg)
+                        }
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Refresh,
+                            contentDescription = "Reset event log"
+                        )
+                    }
+                }
+
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    filterChips.forEach { (id, label) ->
+                        FilterChip(
+                            selected = eventLogFilter == id,
+                            onClick = { eventLogFilter = id },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+
+                if (filteredEntries.isEmpty()) {
+                    Surface(
+                        shape = RoundedCornerShape(18.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = "No hook events recorded for this filter yet. Launch a scoped target app and trigger pinning or focus transitions.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(16.dp)
+                        )
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(360.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(filteredEntries) { entry ->
+                            EventLogRow(entry = entry, formattedTime = timeFmt.format(Date(entry.timestampMs)))
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(16.dp))
+            }
+        }
+    }
 }
 
 @Composable
 private fun StatTile(
     label: String,
     count: Long,
+    onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     Surface(
+        onClick = onClick,
         modifier = modifier,
         shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceContainerHigh
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
@@ -892,17 +1336,84 @@ private fun StatTile(
                 text = count.toString(),
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Bold,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.primary
+                fontFamily = FontFamily.Monospace
             )
             Text(
                 text = label,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
+                maxLines = 1
             )
         }
+    }
+}
+
+@Composable
+private fun EventLogRow(entry: HookLogEntry, formattedTime: String) {
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = entry.method,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Text(
+                    text = "${entry.pkg} · $formattedTime",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = MaterialTheme.colorScheme.secondaryContainer
+            ) {
+                Text(
+                    text = "×${entry.count}",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun InlineAppRuleSwitch(
+    title: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f)
+        )
+        ExpressiveSwitch(checked = checked, onCheckedChange = onCheckedChange)
     }
 }
 
@@ -919,11 +1430,24 @@ private fun ExpressiveToggleRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = if (checked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(
+                    if (checked) MaterialTheme.colorScheme.secondaryContainer
+                    else MaterialTheme.colorScheme.surfaceContainerHighest
+                ),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = null,
+                tint = if (checked) MaterialTheme.colorScheme.onSecondaryContainer
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(20.dp)
+            )
+        }
         Column(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(2.dp)
