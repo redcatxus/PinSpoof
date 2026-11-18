@@ -1,56 +1,50 @@
 # PinSpoof
 
-App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundle (`PinSpoof-v1.3.1.apk` / `PinSpoof-v1.3.1.mpp`) targeting **Android 7.0 – Android 16 (API 24–36)**:
+App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundle targeting **Android 7.0 – Android 16 (API 24–36)**:
 
-1. **Disables System App Pinning**: Intercepts `Activity.startLockTask()`, `Activity.stopLockTask()`, `ActivityClient`, and optional Binder `Stub$Proxy` calls (with dynamic OEM-safe method scanning) locally within the target app's ART process without modifying `system_server`.
-2. **Emulates Pinned State**: Reports `ActivityManager.getLockTaskModeState()` -> `LOCK_TASK_MODE_PINNED` (`2`) and `isInLockTaskMode()` -> `true` in safe **Reactive** mode by default (or optional **Always Pinned**), alongside optional `Settings.System` (`lock_to_app_enabled`) and `DevicePolicyManager.isLockTaskPermitted()` overrides.
-3. **Preserves Foreground, WebView & Display State**:
-   - **Window Focus Spoofing (Safe Default)**: Drops `View.dispatchWindowFocusChanged(false)`, `ViewTreeObserver`, `DecorView`, `Activity.performTopResumedActivityChanged(false)`, safe `onUserLeaveHint()`, maintains `hasWindowFocus() -> true`, and keeps `ActivityManager.getMyMemoryState()` at `IMPORTANCE_FOREGROUND`.
-   - **WebView Visibility, JS & Pause Stealth (Opt-in)**: Forces `WebView` visibility `VISIBLE`, blocks `WebView.onPause()` / `pauseTimers()`, and injects DOM stealth (`document.hidden = false`, `document.visibilityState = "visible"`, `document.hasFocus = () => true`, `visibilitychange` / `blur` suppression).
-   - **Lifecycle Suppression (Advanced Opt-in)**: Off by default to prevent `SurfaceView` / `TextureView` graphics stalls when resuming from Recents; optionally blocks `onPause()`, `onStop()`, `Application.ActivityLifecycleCallbacks`, and `LifecycleRegistry` (`ON_PAUSE`/`ON_STOP`).
-   - **Display, Media & UI Bypass**: Simulate zeroed pinned `WindowInsets`, strip `FLAG_SECURE`, expose only `Display.DEFAULT_DISPLAY` for virtual/screen-sharing bypass, unblock `ClipboardManager.clearPrimaryClip()`, hide `AccessibilityManager` / overlay checks, and retain `AudioManager` focus.
-4. **Anti-Detection & Integrity Cloaking**:
-   - **Package & Installer Cloaking**: Report `com.android.vending` as installer and hide Xposed / LSPosed / Morphe manager packages from `PackageManager`.
-   - **Stack Trace Sanitization & Motion Sensors**: Strip hook frames from `Thread` / `Throwable.getStackTrace()` and clamp accelerometer/gyroscope readings to resting desk values.
-   - **Signature & Play Integrity Handling**: Optional `PackageInfo.signatures` / `SigningInfo` replacement via Certificate DER Hex and soft-fail clearing on Integrity / SafetyNet `Task.getException()`.
-5. **Accessible Anywhere**:
-   - **Morphe Patching (No Root / No Xposed)**: All controls are exposed directly as **Morphe Patching Options** inside `PinSpoof-v1.3.1.mpp` (universal patch, works on any APK).
-   - **LSPosed Xposed + Material 3 Expressive UI**: Inline expandable per-app rules & presets (`Light`, `Balanced`, `Aggressive`), JSON export/import, and a tappable **Live Hook Event Counter** & method event log drawer via `xposedsharedprefs`.
+1. **Disables System App Pinning**: Intercepts `Activity.startLockTask()`, `Activity.stopLockTask()`, `ActivityClient`, and Binder `Stub$Proxy` calls locally within the target app's ART process without modifying `system_server`.
+2. **Emulates Pinned State**: Reports `ActivityManager.getLockTaskModeState()` -> `LOCK_TASK_MODE_PINNED` (`2`) and `isInLockTaskMode()` -> `true` when active, alongside optional `Settings.System` (`lock_to_app_enabled`) and `DevicePolicyManager.isLockTaskPermitted()` overrides.
+3. **Preserves Foreground, Focus & Recents State**:
+   - Filters `BroadcastReceiver.onReceive()` for `Intent.ACTION_CLOSE_SYSTEM_DIALOGS` (`recentapps` / `homekey`) via dynamic `registerReceiver` hooking in LSPosed and direct bytecode patching in Morphe.
+   - Suppresses `onWindowFocusChanged(false)` across `Activity`, app subclasses, `DecorView`, `Dialog`, and `Window.Callback` listeners, plus API 29+ `Activity.onTopResumedActivityChanged(false)` and `onUserLeaveHint()`.
+   - Keeps `hasWindowFocus() -> true` and reports `IMPORTANCE_FOREGROUND` across both `ActivityManager.getMyMemoryState()` and `ActivityManager.getRunningAppProcesses()`.
+4. **WebView & Fragment Lifecycle Continuity**:
+   - Injects DOM focus/visibility continuity across `onPageStarted`, `onPageFinished`, `onAttachedToWindow`, `setWebViewClient()`, and `loadUrl()`, suppressing `focusout`, `pagehide`, `freeze`, `blur`, `visibilitychange`, and `webkitvisibilitychange` while preserving `document.hidden = false`, `document.visibilityState = "visible"`, and `document.hasFocus() = true`.
+   - Maintains `WebView.getWindowVisibility() -> View.VISIBLE`, `dispatchWindowVisibilityChanged`, and API 24+ `onVisibilityAggregated(false) -> true`.
+   - Extends `onPause()` / `onStop()` preservation to `androidx.fragment.app.Fragment`, `android.app.Fragment`, `Application.ActivityLifecycleCallbacks`, and `LifecycleRegistry` (`ON_PAUSE` / `ON_STOP`).
+5. **Display, Media, Sensor & Environment Compatibility**:
+   - **Display & Screenshot Controls**: Removes `FLAG_SECURE` on `Window` and `SurfaceView` so screenshots and screen recording work normally, simulates zeroed pinned `WindowInsets`, and exposes `Display.DEFAULT_DISPLAY` in `DisplayManager` while filtering secondary display callbacks.
+   - **Audio & Clipboard Preservation**: Retains `AudioManager` audio focus across interruptions and blocks `ClipboardManager.clearPrimaryClip()` or blank `setPrimaryClip()` clipboard wipes.
+   - **Motion Sensor Stabilization**: Provides steady resting readings for accelerometer, gravity, gyroscope, and linear-acceleration events and suppresses `TYPE_SIGNIFICANT_MOTION` triggers for apps that interrupt UI sessions when the device is moved.
+   - **Environment, Signature & Integrity Compatibility**: Reports `com.android.vending` as the package installer, filters framework/module packages from `PackageManager` queries, keeps `Thread.getStackTrace()` / `Throwable.getStackTrace()` clean of hook frames, filters `AccessibilityManager` and overlay state checks, and offers optional original signing certificate DER hex preservation (`PackageInfo.signatures` / `SigningInfo`) plus graceful `Task.getException()` handling for Morphe-repackaged APKs.
+6. **Material 3 Expressive UI & Live Hook Inspector**:
+   - Configure global defaults or inline per-app overrides with one-tap **Light**, **Balanced**, and **Aggressive** presets, throttled live `XSharedPreferences` reloading, JSON profile import/export, real-time hook counters (**Pinning**, **Focus**, **WebView**, **Lifecycle**), and a fullscreen-expandable method-level **Live Hook Event Log** drawer.
 
 ## Practical Usage
 
-PinSpoof lets you stay in control of multitasking and system navigation without breaking apps that lock the screen or reset their state during brief interruptions:
+PinSpoof lets you stay in control of multitasking, screenshots, and system navigation without breaking apps that lock the screen or reset their state during brief interruptions:
 
-- **Keep Android Navigation & Recents Unlocked**: Prevent apps from locking your device into Screen Pinning so the Back button, Recents overview, gesture navigation, Quick Settings, and notifications always remain usable without disrupting the app's internal layout or navigation state.
-- **Multitask Without State Resets or Media Pauses**: Open Recents, pull down the notification shade, check a reference note, reply to a message, or use floating/split-screen windows without triggering unwanted WebView playback/timer pauses, aggressive activity teardowns, clipboard wipes, or full state resets.
-- **No `system_server` Scoping Required**: Unlike legacy pinning modules that target the Android System Framework (`android`), PinSpoof operates strictly inside the scoped target app process (or directly inside a Morphe-patched APK without root or LSPosed).
-- **Per-App Presets & Patch-Time Granularity**: Leave pinning disabled across all scoped apps with **Reactive** mode (emulates pinned state only after `startLockTask()` is invoked) or assign **Light**, **Balanced**, or **Aggressive** profiles per app directly inside the app picker.
+- **Keep Android Navigation & Recents Unlocked**: Prevent apps from locking your device into Screen Pinning so the Back button, 3-button/gesture Recents overview, Quick Settings, and notifications remain accessible at all times without disrupting the app's internal layout or navigation state.
+- **Multitask Without State Resets, Clipboard Wipes, or Media Pauses**: Open Recents, pull down the notification shade, check a reference note, reply to a message, or use floating/split-screen windows without triggering unwanted WebView playback/timer pauses, audio focus drops, clipboard clears, or full activity teardowns.
+- **Take Screenshots & Cast Freely**: Strip restrictive `FLAG_SECURE` flags and secondary-display warnings so you can take personal screenshots, record your screen, or mirror displays without apps blanking out or complaining.
+- **No `system_server` Scoping Required**: Unlike legacy pinning modules that hook the Android System Framework (`android`), PinSpoof operates strictly inside the scoped target app process (or directly inside a Morphe-patched APK without root or LSPosed).
+- **One-Tap Presets & Live Hook Diagnostics**: Start immediately with the **Balanced** default profile, switch to **Light** (pinning-only) for games or `SurfaceView`-heavy apps, or inspect real-time method hit counts in the Live Hook Event Log to see exactly which hooks an app triggers.
 
 ## Option 1: Morphe Patching (No Root / No Xposed)
 
-> **Note:** Morphe re-signs the patched APK. Apps that enforce signature verification can use **Static Package Signature Spoof** with your original certificate DER hex, or use **Option 2 (LSPosed)**.
+> **Note:** Morphe re-signs the patched APK. For apps that check signing certificates or client integrity APIs, enable the optional signing certificate DER hex and integrity compatibility toggles in Patching Options, or use **Option 2 (LSPosed)**.
 
-1. Download the `PinSpoof-morphe-patches` artifact (`PinSpoof-v1.3.1.mpp`) built by `.github/workflows/build-apk.yml`, or build locally in `morphe-patches/`:
-   ```bash
-   gradle :patches:buildAndroid :patches:generatePatchesList
-   ```
+1. Download `PinSpoof-v1.3.1.mpp` from [Releases](https://github.com/redcatxus/PinSpoof/releases) (or build locally in `morphe-patches/` via `gradle :patches:buildAndroid :patches:generatePatchesList`).
 2. Import `PinSpoof-v1.3.1.mpp` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI**.
-3. Pick any target APK, open **Patching Options** on the **PinSpoof** universal patch to configure:
-   - **`Spoof Timing Mode`**: `Reactive (after startLockTask)` (default) or `Always Pinned (from launch)`.
-   - **`Disable Pinning (startLockTask / stopLockTask)`** & **`Binder Stub$Proxy LockTask Interception`**.
-   - **`Spoof ActivityManager Pin State`** & **`Hide Multi-Window & Picture-in-Picture`**.
-   - **`Window Focus Spoofing (Safe)`**, **`WebView Visibility, JS & Pause Stealth`**, & **`Suppress onPause / onStop (Advanced)`**.
-   - **`Simulate Pinned Window Insets`**, **`Strip FLAG_SECURE`**, **`Virtual Display & Screen Sharing Bypass`**, **`Unblock Clipboard Clear`**, **`Hide Accessibility & Overlay Checks`**, & **`Retain Audio Focus`**.
-   - **`Cloak Packages & Play Store Installer`**, **`Sanitize Stack Traces`**, **`Spoof Motion Sensors (Stationary)`**, **`Static Package Signature Spoof`** + **`Original Certificate DER Hex`**, & **`Play Integrity / SafetyNet Soft-Fail`**.
-   - **`Spoof Settings.System lock_to_app_enabled`**, **`Spoof DevicePolicyManager.isLockTaskPermitted`**, & **`Verbose Logcat Debug Logging`**.
+3. Pick any target APK and open **Patching Options** on the **PinSpoof** patch to customize your preset or individual toggles (pinning, Recents broadcasts, window focus, WebView JS/visibility, lifecycle preservation, multi-window/PiP, display/screenshot/audio/clipboard controls, sensor stabilization, and environment/signature compatibility).
 4. Patch and install the modified APK.
 
 ## Option 2: LSPosed Setup
 
-1. Install `PinSpoof-v1.3.1.apk` (from `PinSpoof-apks`).
+1. Install **`PinSpoof-v1.3.1.apk`** (`versionCode: 5`) from [Releases](https://github.com/redcatxus/PinSpoof/releases).
 2. Open **LSPosed Manager** -> **Modules** -> **PinSpoof**.
 3. Enable the module and select **only the target apps** you want to affect (keep **System Framework (`android`) UNCHECKED**).
-4. Open **PinSpoof**, tap **Select App Override** to expand inline per-app rules/presets (`Light` / `Balanced` / `Aggressive`), import/export JSON configs, or tap any **Live Hook Event Counter** tile to inspect triggered methods, then force-stop and relaunch your target app.
+4. Open the **PinSpoof** companion app to select a preset (**Light**, **Balanced**, **Aggressive**) or customize granular toggles globally or per app, then force-stop and relaunch your target app.
 
 - **Package ID**: `us.redcatx.pinspoof`
 - **Entry Class**: `us.redcatx.pinspoof.PinSpoofModule`
