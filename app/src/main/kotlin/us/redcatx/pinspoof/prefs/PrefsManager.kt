@@ -121,6 +121,154 @@ data class GranularHookState(
     fun matchingPreset(): HookPreset? =
         HookPreset.entries.firstOrNull { this == this.withPreset(it) }
 
+    fun pruneUnusedHooks(loggedEntries: List<HookLogEntry>): Pair<GranularHookState, Int> {
+        val activeMethods = loggedEntries
+            .filter { it.count > 0L }
+            .map { it.category to it.method }
+
+        fun hasHit(predicate: (category: String, method: String) -> Boolean): Boolean =
+            activeMethods.any { (c, m) -> predicate(c, m) }
+
+        val next = copy(
+            hideFocusLoss = hideFocusLoss && hasHit { c, m ->
+                c == "focus" &&
+                    !m.startsWith("OnAudioFocusChange") &&
+                    !m.contains("MultiWindow") &&
+                    !m.contains("PictureInPicture")
+            },
+            hideWebViewVisibility = hideWebViewVisibility && hasHit { c, _ -> c == "webview" },
+            hideLifecycleLoss = hideLifecycleLoss && hasHit { c, _ -> c == "lifecycle" },
+            hideMultiWindowPip = hideMultiWindowPip && hasHit { _, m ->
+                m.contains("MultiWindow") || m.contains("PictureInPicture")
+            },
+            spoofPinnedInsets = spoofPinnedInsets && hasHit { _, m -> m.startsWith("WindowInsets.") },
+            stripFlagSecure = stripFlagSecure && hasHit { _, m ->
+                m.contains("FLAG_SECURE") || m.startsWith("SurfaceView.setSecure")
+            },
+            hideAccessibilityOverlays = hideAccessibilityOverlays && hasHit { _, m ->
+                m.startsWith("AccessibilityManager.") || m.startsWith("Settings.canDrawOverlays")
+            },
+            retainAudioFocus = retainAudioFocus && hasHit { _, m -> m.startsWith("OnAudioFocusChange") },
+            cloakPackagesInstaller = cloakPackagesInstaller && hasHit { _, m -> m.startsWith("PackageManager.") },
+            sanitizeStackTraces = sanitizeStackTraces && hasHit { _, m -> m.endsWith(".getStackTrace()") },
+            spoofMotionSensors = spoofMotionSensors && hasHit { _, m -> m.startsWith("Sensor.") },
+            bypassVirtualDisplays = bypassVirtualDisplays && hasHit { _, m ->
+                m.startsWith("DisplayManager.") || m.startsWith("DisplayListener.")
+            },
+            unblockClipboard = unblockClipboard && hasHit { _, m -> m.startsWith("ClipboardManager.") },
+            spoofPackageSignature = spoofPackageSignature && hasHit { _, m ->
+                m.startsWith("PackageInfo.signatures") || m.startsWith("SigningInfo.")
+            },
+            softFailIntegrity = softFailIntegrity && hasHit { _, m -> m.startsWith("PlayIntegrity.") },
+            hookActivityLockTask = hookActivityLockTask && hasHit { c, m ->
+                c == "pin" && m.startsWith("Activity.")
+            },
+            hookActivityManagerState = hookActivityManagerState && hasHit { c, m ->
+                c == "pin" && m.startsWith("ActivityManager.")
+            },
+            hookActivityClient = hookActivityClient && hasHit { c, m ->
+                c == "pin" && m.startsWith("ActivityClient.")
+            },
+            hookBinderProxies = hookBinderProxies && hasHit { c, m ->
+                c == "pin" && (m.startsWith("IActivityTaskManager.") || m.startsWith("IActivityManager."))
+            },
+            hookSettingsLockToApp = hookSettingsLockToApp && hasHit { _, m -> m.startsWith("Settings.System.") },
+            hookDpmPermitted = hookDpmPermitted && hasHit { _, m -> m.startsWith("DevicePolicyManager.") }
+        )
+
+        val disabledCount = listOf(
+            hideFocusLoss to next.hideFocusLoss,
+            hideWebViewVisibility to next.hideWebViewVisibility,
+            hideLifecycleLoss to next.hideLifecycleLoss,
+            hideMultiWindowPip to next.hideMultiWindowPip,
+            spoofPinnedInsets to next.spoofPinnedInsets,
+            stripFlagSecure to next.stripFlagSecure,
+            hideAccessibilityOverlays to next.hideAccessibilityOverlays,
+            retainAudioFocus to next.retainAudioFocus,
+            cloakPackagesInstaller to next.cloakPackagesInstaller,
+            sanitizeStackTraces to next.sanitizeStackTraces,
+            spoofMotionSensors to next.spoofMotionSensors,
+            bypassVirtualDisplays to next.bypassVirtualDisplays,
+            unblockClipboard to next.unblockClipboard,
+            spoofPackageSignature to next.spoofPackageSignature,
+            softFailIntegrity to next.softFailIntegrity,
+            hookActivityLockTask to next.hookActivityLockTask,
+            hookActivityManagerState to next.hookActivityManagerState,
+            hookActivityClient to next.hookActivityClient,
+            hookBinderProxies to next.hookBinderProxies,
+            hookSettingsLockToApp to next.hookSettingsLockToApp,
+            hookDpmPermitted to next.hookDpmPermitted
+        ).count { (before, after) -> before && !after }
+
+        return next to disabledCount
+    }
+
+    fun toMorpheOptionsPairs(): List<Pair<String, String>> {
+        val timing = if (alwaysSpoofPinned) "always" else "reactive"
+        val items = mutableListOf(
+            "spoofTiming" to timing,
+            "hookActivityLockTask" to hookActivityLockTask.toString(),
+            "hookActivityManagerState" to hookActivityManagerState.toString(),
+            "hookBinderProxies" to hookBinderProxies.toString(),
+            "hideFocusLoss" to hideFocusLoss.toString(),
+            "hideWebViewVisibility" to hideWebViewVisibility.toString(),
+            "hideLifecycleLoss" to hideLifecycleLoss.toString(),
+            "hideMultiWindowAndPip" to hideMultiWindowPip.toString(),
+            "spoofPinnedInsets" to spoofPinnedInsets.toString(),
+            "stripFlagSecure" to stripFlagSecure.toString(),
+            "bypassVirtualDisplays" to bypassVirtualDisplays.toString(),
+            "unblockClipboard" to unblockClipboard.toString(),
+            "hideAccessibilityAndOverlays" to hideAccessibilityOverlays.toString(),
+            "retainAudioFocus" to retainAudioFocus.toString(),
+            "cloakPackagesAndInstaller" to cloakPackagesInstaller.toString(),
+            "sanitizeStackTraces" to sanitizeStackTraces.toString(),
+            "spoofMotionSensors" to spoofMotionSensors.toString(),
+            "spoofPackageSignature" to spoofPackageSignature.toString()
+        )
+        val cleanHex = spoofSignatureHex.replace(":", "").replace(" ", "").trim()
+        if (spoofPackageSignature && cleanHex.isNotEmpty()) {
+            items += "originalSignatureHex" to cleanHex
+        }
+        items += listOf(
+            "softFailIntegrityChecks" to softFailIntegrity.toString(),
+            "hookSettingsLockToApp" to hookSettingsLockToApp.toString(),
+            "hookDevicePolicyPermitted" to hookDpmPermitted.toString(),
+            "debugLogging" to debugLogging.toString()
+        )
+        return items
+    }
+
+    fun toMorpheCliFlags(): String =
+        toMorpheOptionsPairs().joinToString(" ") { (k, v) ->
+            if (k == "originalSignatureHex") "-O$k=\"$v\"" else "-O$k=$v"
+        }
+
+    fun toMorpheChecklist(): List<Pair<String, String>> = listOf(
+        "Spoof Timing Mode" to if (alwaysSpoofPinned) "Always Pinned (from launch)" else "Reactive (after startLockTask)",
+        "Disable Pinning (startLockTask / stopLockTask)" to if (hookActivityLockTask) "ON" else "OFF",
+        "Spoof ActivityManager Pin State" to if (hookActivityManagerState) "ON" else "OFF",
+        "Binder Stub\$Proxy LockTask Interception" to if (hookBinderProxies) "ON" else "OFF",
+        "Window Focus Spoofing (Safe)" to if (hideFocusLoss) "ON" else "OFF",
+        "WebView Visibility, JS & Pause Stealth" to if (hideWebViewVisibility) "ON" else "OFF",
+        "Suppress onPause / onStop" to if (hideLifecycleLoss) "ON" else "OFF",
+        "Hide Multi-Window & Picture-in-Picture" to if (hideMultiWindowPip) "ON" else "OFF",
+        "Simulate Pinned Window Insets" to if (spoofPinnedInsets) "ON" else "OFF",
+        "Strip FLAG_SECURE" to if (stripFlagSecure) "ON" else "OFF",
+        "Virtual Display & Screen Sharing Bypass" to if (bypassVirtualDisplays) "ON" else "OFF",
+        "Unblock Clipboard Clear" to if (unblockClipboard) "ON" else "OFF",
+        "Hide Accessibility & Overlay Checks" to if (hideAccessibilityOverlays) "ON" else "OFF",
+        "Retain Audio Focus" to if (retainAudioFocus) "ON" else "OFF",
+        "Cloak Packages & Play Store Installer" to if (cloakPackagesInstaller) "ON" else "OFF",
+        "Sanitize Stack Traces" to if (sanitizeStackTraces) "ON" else "OFF",
+        "Spoof Motion Sensors (Stationary)" to if (spoofMotionSensors) "ON" else "OFF",
+        "Static Package Signature Spoof" to if (spoofPackageSignature) "ON" else "OFF",
+        "Original Certificate DER Hex" to spoofSignatureHex.trim().ifEmpty { "(empty)" },
+        "Play Integrity / SafetyNet Soft-Fail" to if (softFailIntegrity) "ON" else "OFF",
+        "Spoof Settings.System lock_to_app_enabled" to if (hookSettingsLockToApp) "ON" else "OFF",
+        "Spoof DevicePolicyManager.isLockTaskPermitted" to if (hookDpmPermitted) "ON" else "OFF",
+        "Verbose Logcat Debug Logging" to if (debugLogging) "ON" else "OFF"
+    )
+
     fun toJson(targetPackage: String?): String = JSONObject().apply {
         put("schemaVersion", 3)
         put("targetPackage", targetPackage ?: "global")
@@ -391,6 +539,13 @@ class PrefsManager(context: Context) {
             lastUpdatedMs = statsPrefs.getLong("$key::ts", 0L)
         )
     }
+
+    fun getPackageHitTotal(packageName: String): Long =
+        statsPrefs.getLong("$packageName::pin", 0L) +
+            statsPrefs.getLong("$packageName::focus", 0L) +
+            statsPrefs.getLong("$packageName::lifecycle", 0L) +
+            statsPrefs.getLong("$packageName::webview", 0L) +
+            statsPrefs.getLong("$packageName::cloak", 0L)
 
     fun loadEventLog(targetPackage: String?): List<HookLogEntry> {
         val raw = statsPrefs.getString("events_log", "[]") ?: "[]"

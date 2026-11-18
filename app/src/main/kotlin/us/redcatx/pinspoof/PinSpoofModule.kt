@@ -54,7 +54,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * PinSpoof v1.3.1 — App-Scoped LockTask, Anti-Detection & UI Stealth Module (Android 7 – 16 / API 24 – 36)
+ * PinSpoof v1.3.2 — App-Scoped LockTask, Anti-Detection & UI Stealth Module (Android 7 – 16 / API 24 – 36)
  *
  * 1. Reactive mode + Window Focus, WebView visibility/JS stealth, and Activity/Fragment lifecycle
  *    stealth are ON by default; Binder Stub$Proxy hooks, anti-detection cloaking, virtual display
@@ -507,11 +507,13 @@ class PinSpoofModule : IXposedHookLoadPackage {
                                         }
                                         name == "getLockTaskModeState" -> {
                                             if (shouldSpoofAsPinned(pkg)) {
+                                                recordStat(pkg, "pin", "$label.$name()")
                                                 param.result = ActivityManager.LOCK_TASK_MODE_PINNED
                                             }
                                         }
                                         name == "isInLockTaskMode" -> {
                                             if (shouldSpoofAsPinned(pkg)) {
+                                                recordStat(pkg, "pin", "$label.$name()")
                                                 param.result = true
                                             }
                                         }
@@ -726,6 +728,9 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (!shouldHideFocus(pkg)) return
                         val outInfo = param.args[0] as? ActivityManager.RunningAppProcessInfo ?: return
+                        if (outInfo.importance != ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
+                            recordStat(pkg, "focus", "ActivityManager.getMyMemoryState()")
+                        }
                         outInfo.importance = ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
                     }
                 }
@@ -1155,6 +1160,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (readBool(pkg, "hide_multi_window_pip", HookConfig.HIDE_MULTI_WINDOW_PIP)) {
+                                recordStat(pkg, "focus", "Activity.isInMultiWindowMode()")
                                 param.result = false
                             }
                         }
@@ -1166,6 +1172,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (readBool(pkg, "hide_multi_window_pip", HookConfig.HIDE_MULTI_WINDOW_PIP)) {
+                                recordStat(pkg, "focus", "Activity.isInPictureInPictureMode()")
                                 param.result = false
                             }
                         }
@@ -1189,6 +1196,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             val typeMask = param.args[0] as? Int ?: return
                             val systemBarsMask = WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
                             if ((typeMask and systemBarsMask) != 0) {
+                                recordStat(pkg, "cloak", "WindowInsets.getInsets()")
                                 param.result = Insets.NONE
                             }
                         }
@@ -1204,6 +1212,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             val typeMask = param.args[0] as? Int ?: return
                             val systemBarsMask = WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
                             if ((typeMask and systemBarsMask) != 0) {
+                                recordStat(pkg, "cloak", "WindowInsets.isVisible()")
                                 param.result = false
                             }
                         }
@@ -1226,6 +1235,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (shouldSpoofInsets(pkg)) {
+                                recordStat(pkg, "cloak", "WindowInsets.$methodName()")
                                 param.result = 0
                             }
                         }
@@ -1445,6 +1455,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         }
                         if (filtered.size != list.size) {
                             param.result = filtered
+                            recordStat(pkg, "cloak", "PackageManager.queryIntentActivities()")
                         }
                     }
                 }

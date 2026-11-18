@@ -92,12 +92,12 @@ export function ModuleBuilder({
     {
       key: 'hideWebViewVisibility',
       label: 'WebView Visibility, JS & Pause Stealth',
-      detail: 'Split out for stability: force View.VISIBLE, block WebView.onPause(), inject Page Visibility JS.',
+      detail: 'Force View.VISIBLE, block WebView.onPause()/onVisibilityAggregated(false), inject Page Visibility/blur/focusout JS.',
     },
     {
       key: 'hideLifecycleLoss',
-      label: 'Suppress onPause / onStop (Advanced)',
-      detail: 'OFF by default: blocking Activity/LifecycleRegistry transitions can freeze SurfaceView graphics.',
+      label: 'Suppress onPause / onStop',
+      detail: 'Block Activity/Fragment/LifecycleRegistry transitions to hide Recents switching (disable if a SurfaceView stalls).',
     },
     {
       key: 'hideMultiWindowAndPip',

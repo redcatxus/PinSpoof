@@ -32,8 +32,8 @@ export function InstallGuide({
     },
     {
       index: '04.',
-      title: 'Inspect Live Method Event Logs',
-      body: `Tap any tile in the Live Hook Event Counter card to open the filtered method drawer, or export/import per-app JSON profiles across devices.`,
+      title: 'Prune Hooks & Export Morphe CLI',
+      body: `Tap Live Hook Event Counter tiles to prune 0-hit hooks via Keep Active Only, or copy per-app settings as Morphe CLI -O flags and checklists.`,
     },
   ];
 
@@ -67,20 +67,21 @@ export function InstallGuide({
 
         <div className="mt-6 rounded-lg border border-slate-800 bg-[#111827] p-5">
           <h3 className="font-display text-sm font-semibold text-slate-200">
-            v{versionName} Stability, Cloaking &amp; Split Hook Architecture
+            v{versionName} Stability, Cloaking &amp; Recents Stealth Architecture
           </h3>
           <p className="mt-2 text-xs text-slate-400 leading-relaxed max-w-4xl">
             By default, {moduleName} v{versionName} uses the{' '}
             <strong className="text-slate-200">Balanced</strong> profile (
             <code className="font-mono text-slate-300">spoofTiming=reactive</code>,{' '}
             <code className="font-mono text-slate-300">hideFocusLoss=true</code>,{' '}
-            <code className="font-mono text-slate-300">hideWebViewVisibility=false</code>,{' '}
-            <code className="font-mono text-slate-300">hideLifecycleLoss=false</code>, and{' '}
-            <code className="font-mono text-slate-300">hookBinderProxies=false</code>) so apps
-            never skip startup checks, crash WebView GPU processes, or stall{' '}
-            <code className="font-mono text-slate-300">SurfaceView</code> graphics on resume. Enable
-            package/stack/sensor cloaking, virtual display &amp; clipboard bypass, signature DER hex
-            spoofing, or Play Integrity soft-fail per-app or via Morphe Patching Options when needed.
+            <code className="font-mono text-slate-300">hideWebViewVisibility=true</code>,{' '}
+            <code className="font-mono text-slate-300">hideLifecycleLoss=true</code>, and{' '}
+            <code className="font-mono text-slate-300">hookBinderProxies=false</code>) so Recents and
+            app switching remain hidden even in strict WebView apps. Use the{' '}
+            <strong className="text-slate-200">Light</strong> preset or{' '}
+            <strong className="text-slate-200">Keep Active Only</strong> pruning if a{' '}
+            <code className="font-mono text-slate-300">SurfaceView</code> game stalls on resume, and
+            enable cloaking, virtual display &amp; clipboard bypass, or signature spoofing as needed.
           </p>
         </div>
       </div>

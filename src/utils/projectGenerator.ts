@@ -166,11 +166,14 @@ function generatePinSpoofModuleKt(config: ModuleConfig, pkg: string): string {
 import android.app.Activity
 import android.app.ActivityManager
 import android.app.Application
+import android.app.Dialog
 import android.app.admin.DevicePolicyManager
+import android.content.BroadcastReceiver
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentResolver
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
@@ -188,6 +191,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
 import android.os.SystemClock
 import android.provider.Settings
 import android.view.Display
@@ -215,8 +219,8 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * ${config.moduleName} v${config.versionName} — App-Scoped LockTask, Anti-Detection & UI Stealth Module (Android 7 – 16 / API 24 – 36)
  *
- * 1. Reactive mode + safe Window Focus spoofing are ON by default; aggressive pause/stop blocking,
- *    WebView visibility/JS stealth, Binder Stub\$Proxy hooks, anti-detection cloaking, virtual display
+ * 1. Reactive mode + Window Focus, WebView visibility/JS stealth, and Activity/Fragment lifecycle
+ *    stealth are ON by default; Binder Stub\$Proxy hooks, anti-detection cloaking, virtual display
  *    & clipboard bypass, sensor spoofing, signature spoof, and integrity soft-fail are opt-in.
  * 2. Dynamic method-name scanning for ActivityClient & Binder Stub\$Proxy with strict error guards.
  * 3. Throttled live event reporting (counts + method-level event log) to the PinSpoof UI.
@@ -226,9 +230,11 @@ class PinSpoofModule : IXposedHookLoadPackage {
     private val spoofedPinned = AtomicBoolean(HookConfig.ALWAYS_SPOOF_PINNED)
     private val hookedActivityClasses = ConcurrentHashMap.newKeySet<String>()
     private val hookedWebViewClients = ConcurrentHashMap.newKeySet<String>()
+    private val hookedReceivers = ConcurrentHashMap.newKeySet<String>()
     private val hookedAudioListeners = ConcurrentHashMap.newKeySet<String>()
     private val hookedSensorListeners = ConcurrentHashMap.newKeySet<String>()
     private val hookedDisplayListeners = ConcurrentHashMap.newKeySet<String>()
+    private val lastPrefsCheckMs = AtomicLong(0L)
 
     private val appContextRef = AtomicReferenceContext()
     private val pendingPinEvents = AtomicLong(0L)
@@ -268,11 +274,20 @@ class PinSpoofModule : IXposedHookLoadPackage {
         }.getOrNull()
     }
 
-    private fun readBool(pkg: String, key: String, fallback: Boolean): Boolean {
-        val xPrefs = prefs ?: return fallback
-        if (xPrefs.hasFileChanged()) {
-            xPrefs.reload()
+    private fun activePrefs(): XSharedPreferences? {
+        val xPrefs = prefs ?: return null
+        val now = SystemClock.elapsedRealtime()
+        val prev = lastPrefsCheckMs.get()
+        if (now - prev >= 500L && lastPrefsCheckMs.compareAndSet(prev, now)) {
+            if (xPrefs.hasFileChanged()) {
+                xPrefs.reload()
+            }
         }
+        return xPrefs
+    }
+
+    private fun readBool(pkg: String, key: String, fallback: Boolean): Boolean {
+        val xPrefs = activePrefs() ?: return fallback
         val hasAppOverride = xPrefs.getBoolean("\${pkg}::override", false)
         return if (hasAppOverride) {
             xPrefs.getBoolean("\${pkg}::\$key", fallback)
@@ -282,10 +297,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
     }
 
     private fun readString(pkg: String, key: String, fallback: String): String {
-        val xPrefs = prefs ?: return fallback
-        if (xPrefs.hasFileChanged()) {
-            xPrefs.reload()
-        }
+        val xPrefs = activePrefs() ?: return fallback
         val hasAppOverride = xPrefs.getBoolean("\${pkg}::override", false)
         return if (hasAppOverride) {
             xPrefs.getString("\${pkg}::\$key", fallback) ?: fallback
@@ -468,18 +480,10 @@ class PinSpoofModule : IXposedHookLoadPackage {
         if (readBool(pkg, "hook_binder_proxies", HookConfig.HOOK_BINDER_PROXIES)) {
             hookBinderProxies(lpparam)
         }
-        if (readBool(pkg, "hide_focus_loss", HookConfig.HIDE_FOCUS_LOSS)) {
-            hookFocusLossSpoof(lpparam)
-        }
-        if (readBool(pkg, "hide_webview_visibility", HookConfig.HIDE_WEBVIEW_VISIBILITY)) {
-            hookWebViewStealth(lpparam)
-        }
-        if (readBool(pkg, "hide_lifecycle_loss", HookConfig.HIDE_LIFECYCLE_LOSS)) {
-            hookLifecycleStealth(lpparam)
-        }
-        if (readBool(pkg, "hide_multi_window_pip", HookConfig.HIDE_MULTI_WINDOW_PIP)) {
-            hookMultiWindowAndPip(lpparam)
-        }
+        hookFocusLossSpoof(lpparam)
+        hookWebViewStealth(lpparam)
+        hookLifecycleStealth(lpparam)
+        hookMultiWindowAndPip(lpparam)
         if (readBool(pkg, "spoof_pinned_insets", HookConfig.SPOOF_PINNED_INSETS)) {
             hookPinnedWindowInsets(lpparam)
         }
@@ -666,11 +670,13 @@ class PinSpoofModule : IXposedHookLoadPackage {
                                         }
                                         name == "getLockTaskModeState" -> {
                                             if (shouldSpoofAsPinned(pkg)) {
+                                                recordStat(pkg, "pin", "\$label.\$name()")
                                                 param.result = ActivityManager.LOCK_TASK_MODE_PINNED
                                             }
                                         }
                                         name == "isInLockTaskMode" -> {
                                             if (shouldSpoofAsPinned(pkg)) {
+                                                recordStat(pkg, "pin", "\$label.\$name()")
                                                 param.result = true
                                             }
                                         }
@@ -732,6 +738,20 @@ class PinSpoofModule : IXposedHookLoadPackage {
             runCatching {
                 XposedBridge.hookAllMethods(
                     decorViewClass,
+                    "dispatchWindowFocusChanged",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldHideFocus(pkg) && param.args.isNotEmpty() && param.args[0] == false) {
+                                recordStat(pkg, "focus", "DecorView.dispatchWindowFocusChanged(false)")
+                                param.result = null
+                            }
+                        }
+                    }
+                )
+            }
+            runCatching {
+                XposedBridge.hookAllMethods(
+                    decorViewClass,
                     "onWindowFocusChanged",
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
@@ -754,7 +774,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun beforeHookedMethod(param: MethodHookParam) {
                         if (shouldHideFocus(pkg) && param.args[0] == false) {
                             recordStat(pkg, "focus", "Activity.onWindowFocusChanged(false)")
-                            param.args[0] = true
+                            param.result = null
                         }
                     }
                 }
@@ -767,6 +787,22 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         if (shouldHideFocus(pkg)) {
                             recordStat(pkg, "focus", "Activity.hasWindowFocus()")
                             param.result = true
+                        }
+                    }
+                }
+            )
+        }
+
+        runCatching {
+            XposedHelpers.findAndHookMethod(
+                Dialog::class.java,
+                "onWindowFocusChanged",
+                Boolean::class.javaPrimitiveType,
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideFocus(pkg) && param.args[0] == false) {
+                            recordStat(pkg, "focus", "Dialog.onWindowFocusChanged(false)")
+                            param.result = null
                         }
                     }
                 }
@@ -801,6 +837,21 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     }
                 }
             )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                XposedHelpers.findAndHookMethod(
+                    Activity::class.java,
+                    "onTopResumedActivityChanged",
+                    Boolean::class.javaPrimitiveType,
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldHideFocus(pkg) && param.args[0] == false) {
+                                recordStat(pkg, "focus", "Activity.onTopResumedActivityChanged(false)")
+                                param.result = null
+                            }
+                        }
+                    }
+                )
+            }
         }
 
         runCatching {
@@ -817,6 +868,18 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     }
                 }
             )
+            XposedHelpers.findAndHookMethod(
+                Activity::class.java,
+                "onUserLeaveHint",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideFocus(pkg) || shouldHideLifecycle(pkg)) {
+                            recordStat(pkg, "focus", "Activity.onUserLeaveHint()")
+                            param.result = null
+                        }
+                    }
+                }
+            )
         }
 
         runCatching {
@@ -828,10 +891,90 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     override fun afterHookedMethod(param: MethodHookParam) {
                         if (!shouldHideFocus(pkg)) return
                         val outInfo = param.args[0] as? ActivityManager.RunningAppProcessInfo ?: return
+                        if (outInfo.importance != ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
+                            recordStat(pkg, "focus", "ActivityManager.getMyMemoryState()")
+                        }
                         outInfo.importance = ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
                     }
                 }
             )
+            XposedHelpers.findAndHookMethod(
+                ActivityManager::class.java,
+                "getRunningAppProcesses",
+                object : XC_MethodHook() {
+                    override fun afterHookedMethod(param: MethodHookParam) {
+                        if (!shouldHideFocus(pkg)) return
+                        val list = param.result as? List<*> ?: return
+                        val myPid = Process.myPid()
+                        var updated = false
+                        for (item in list) {
+                            val info = item as? ActivityManager.RunningAppProcessInfo ?: continue
+                            if (info.pid == myPid || info.processName == pkg || info.pkgList?.contains(pkg) == true) {
+                                if (info.importance != ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND) {
+                                    info.importance = ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+                                    info.importanceReasonCode = ActivityManager.RunningAppProcessInfo.REASON_UNKNOWN
+                                    updated = true
+                                }
+                            }
+                        }
+                        if (updated) {
+                            recordStat(pkg, "focus", "ActivityManager.getRunningAppProcesses()")
+                        }
+                    }
+                }
+            )
+        }
+
+        val hookReceiverArg: (Any?) -> Unit = { candidate ->
+            if (candidate is BroadcastReceiver) {
+                val cls = candidate.javaClass
+                if (hookedReceivers.add(cls.name)) {
+                    runCatching {
+                        XposedHelpers.findAndHookMethod(
+                            cls,
+                            "onReceive",
+                            Context::class.java,
+                            Intent::class.java,
+                            object : XC_MethodHook() {
+                                override fun beforeHookedMethod(p: MethodHookParam) {
+                                    if (!shouldHideFocus(pkg)) return
+                                    val intent = p.args.getOrNull(1) as? Intent ?: return
+                                    if (intent.action == Intent.ACTION_CLOSE_SYSTEM_DIALOGS) {
+                                        recordStat(pkg, "focus", "BroadcastReceiver(CLOSE_SYSTEM_DIALOGS)")
+                                        log(pkg, "Suppressed ACTION_CLOSE_SYSTEM_DIALOGS on \${cls.simpleName}")
+                                        p.result = null
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            }
+        }
+
+        runCatching {
+            XposedBridge.hookAllMethods(
+                ContextWrapper::class.java,
+                "registerReceiver",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        param.args.forEach(hookReceiverArg)
+                    }
+                }
+            )
+            XposedHelpers.findClassIfExists("android.app.ContextImpl", lpparam.classLoader)?.let { ctxImpl ->
+                listOf("registerReceiver", "registerReceiverInternal").forEach { mName ->
+                    XposedBridge.hookAllMethods(
+                        ctxImpl,
+                        mName,
+                        object : XC_MethodHook() {
+                            override fun beforeHookedMethod(param: MethodHookParam) {
+                                param.args.forEach(hookReceiverArg)
+                            }
+                        }
+                    )
+                }
+            }
         }
     }
 
@@ -851,6 +994,57 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         if (shouldHideWebView(pkg) && param.args.isNotEmpty() && param.args[0] != View.VISIBLE) {
                             recordStat(pkg, "webview", "WebView.onWindowVisibilityChanged()")
                             param.args[0] = View.VISIBLE
+                        }
+                    }
+                }
+            )
+            XposedBridge.hookAllMethods(
+                webViewClass,
+                "dispatchWindowVisibilityChanged",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideWebView(pkg) && param.args.isNotEmpty() && param.args[0] != View.VISIBLE) {
+                            param.args[0] = View.VISIBLE
+                        }
+                    }
+                }
+            )
+            XposedHelpers.findAndHookMethod(
+                webViewClass,
+                "getWindowVisibility",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if (shouldHideWebView(pkg)) {
+                            param.result = View.VISIBLE
+                        }
+                    }
+                }
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                XposedBridge.hookAllMethods(
+                    webViewClass,
+                    "onVisibilityAggregated",
+                    object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if (shouldHideWebView(pkg) && param.args.isNotEmpty() && param.args[0] == false) {
+                                recordStat(pkg, "webview", "WebView.onVisibilityAggregated(false)")
+                                param.args[0] = true
+                            }
+                        }
+                    }
+                )
+            }
+            XposedBridge.hookAllMethods(
+                webViewClass,
+                "onWindowFocusChanged",
+                object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        if ((shouldHideFocus(pkg) || shouldHideWebView(pkg)) &&
+                            param.args.isNotEmpty() &&
+                            param.args[0] == false
+                        ) {
+                            recordStat(pkg, "webview", "WebView.onWindowFocusChanged(false)")
+                            param.result = null
                         }
                     }
                 }
@@ -886,20 +1080,26 @@ class PinSpoofModule : IXposedHookLoadPackage {
             )
         }
 
-        runCatching {
-            XposedBridge.hookAllMethods(
-                WebViewClient::class.java,
-                "onPageFinished",
-                object : XC_MethodHook() {
-                    override fun afterHookedMethod(param: MethodHookParam) {
-                        val view = param.args.firstOrNull() as? WebView ?: return
-                        if (shouldHideWebView(pkg)) {
-                            injectWebViewStealthJs(view, pkg)
+        val hookWebViewClientCallbacks = { targetClass: Class<*> ->
+            listOf("onPageStarted", "onPageFinished").forEach { cbName ->
+                runCatching {
+                    XposedBridge.hookAllMethods(
+                        targetClass,
+                        cbName,
+                        object : XC_MethodHook() {
+                            override fun afterHookedMethod(p: MethodHookParam) {
+                                val view = p.args.firstOrNull() as? WebView ?: return
+                                if (shouldHideWebView(pkg)) {
+                                    injectWebViewStealthJs(view, pkg)
+                                }
+                            }
                         }
-                    }
+                    )
                 }
-            )
+            }
         }
+
+        hookWebViewClientCallbacks(WebViewClient::class.java)
 
         runCatching {
             XposedBridge.hookAllMethods(
@@ -910,20 +1110,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         val client = param.args.firstOrNull() as? WebViewClient ?: return
                         val clsName = client.javaClass.name
                         if (hookedWebViewClients.add(clsName)) {
-                            runCatching {
-                                XposedBridge.hookAllMethods(
-                                    client.javaClass,
-                                    "onPageFinished",
-                                    object : XC_MethodHook() {
-                                        override fun afterHookedMethod(p: MethodHookParam) {
-                                            val view = p.args.firstOrNull() as? WebView ?: return
-                                            if (shouldHideWebView(pkg)) {
-                                                injectWebViewStealthJs(view, pkg)
-                                            }
-                                        }
-                                    }
-                                )
-                            }
+                            hookWebViewClientCallbacks(client.javaClass)
                         }
                     }
                 }
@@ -987,6 +1174,33 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     }
                 }
             )
+        }
+
+        listOf("androidx.fragment.app.Fragment", "android.app.Fragment").forEach { fragClassName ->
+            val fragClass = XposedHelpers.findClassIfExists(fragClassName, lpparam.classLoader)
+            if (fragClass != null) {
+                listOf("onPause", "onStop").forEach { mName ->
+                    runCatching {
+                        XposedHelpers.findAndHookMethod(
+                            fragClass,
+                            mName,
+                            object : XC_MethodHook() {
+                                override fun beforeHookedMethod(param: MethodHookParam) {
+                                    if (!shouldHideLifecycle(pkg)) return
+                                    val act = runCatching {
+                                        XposedHelpers.callMethod(param.thisObject, "getActivity") as? Activity
+                                    }.getOrNull()
+                                    if (act?.isFinishing != true) {
+                                        runCatching { XposedHelpers.setBooleanField(param.thisObject, "mCalled", true) }
+                                        recordStat(pkg, "lifecycle", "Fragment.\$mName()")
+                                        param.result = null
+                                    }
+                                }
+                            }
+                        )
+                    }
+                }
+            }
         }
 
         val lifecycleRegistryClass = XposedHelpers.findClassIfExists(
@@ -1079,6 +1293,21 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         }
                     })
                 }
+                runCatching {
+                    val onTopResumed = cls.getDeclaredMethod(
+                        "onTopResumedActivityChanged",
+                        Boolean::class.javaPrimitiveType
+                    )
+                    XposedBridge.hookMethod(onTopResumed, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            if ((shouldHideFocus(pkg) || shouldHideLifecycle(pkg)) && param.args[0] == false) {
+                                recordStat(pkg, "focus", "\$simpleName.onTopResumedActivityChanged(false)")
+                                log(pkg, "Suppressed \$name.onTopResumedActivityChanged(false)")
+                                param.result = null
+                            }
+                        }
+                    })
+                }
             }
             cls = cls.superclass
         }
@@ -1094,6 +1323,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (readBool(pkg, "hide_multi_window_pip", HookConfig.HIDE_MULTI_WINDOW_PIP)) {
+                                recordStat(pkg, "focus", "Activity.isInMultiWindowMode()")
                                 param.result = false
                             }
                         }
@@ -1105,6 +1335,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (readBool(pkg, "hide_multi_window_pip", HookConfig.HIDE_MULTI_WINDOW_PIP)) {
+                                recordStat(pkg, "focus", "Activity.isInPictureInPictureMode()")
                                 param.result = false
                             }
                         }
@@ -1128,6 +1359,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             val typeMask = param.args[0] as? Int ?: return
                             val systemBarsMask = WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
                             if ((typeMask and systemBarsMask) != 0) {
+                                recordStat(pkg, "cloak", "WindowInsets.getInsets()")
                                 param.result = Insets.NONE
                             }
                         }
@@ -1143,6 +1375,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                             val typeMask = param.args[0] as? Int ?: return
                             val systemBarsMask = WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars()
                             if ((typeMask and systemBarsMask) != 0) {
+                                recordStat(pkg, "cloak", "WindowInsets.isVisible()")
                                 param.result = false
                             }
                         }
@@ -1165,6 +1398,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                     object : XC_MethodHook() {
                         override fun beforeHookedMethod(param: MethodHookParam) {
                             if (shouldSpoofInsets(pkg)) {
+                                recordStat(pkg, "cloak", "WindowInsets.\$methodName()")
                                 param.result = 0
                             }
                         }
@@ -1384,6 +1618,7 @@ class PinSpoofModule : IXposedHookLoadPackage {
                         }
                         if (filtered.size != list.size) {
                             param.result = filtered
+                            recordStat(pkg, "cloak", "PackageManager.queryIntentActivities()")
                         }
                     }
                 }
@@ -1824,12 +2059,17 @@ class PinSpoofModule : IXposedHookLoadPackage {
               } catch (e) {}
               try {
                 var stopFocusEvent = function(e) {
-                  if (e.type === 'blur' && e.target !== window && e.target !== document) return;
+                  if ((e.type === 'blur' || e.type === 'focusout') && e.target !== window && e.target !== document) return;
                   e.stopImmediatePropagation();
                 };
                 window.addEventListener('blur', stopFocusEvent, true);
+                window.addEventListener('focusout', stopFocusEvent, true);
+                window.addEventListener('pagehide', stopFocusEvent, true);
+                document.addEventListener('blur', stopFocusEvent, true);
+                document.addEventListener('focusout', stopFocusEvent, true);
                 document.addEventListener('visibilitychange', stopFocusEvent, true);
                 document.addEventListener('webkitvisibilitychange', stopFocusEvent, true);
+                document.addEventListener('freeze', stopFocusEvent, true);
               } catch (e) {}
             })();
         """
@@ -1916,7 +2156,7 @@ import ${pkg}.HookConfig
 
 enum class HookPreset(val label: String, val summary: String) {
     LIGHT("Light", "Pinning bypass & state spoof only"),
-    BALANCED("Balanced", "Safe defaults: pinning + focus + multi-window"),
+    BALANCED("Balanced", "Default stealth: pinning + focus + WebView + lifecycle"),
     AGGRESSIVE("Aggressive", "All stealth, anti-detection, display & UI hooks")
 }
 
@@ -1977,8 +2217,8 @@ data class GranularHookState(
             masterEnabled = true,
             alwaysSpoofPinned = false,
             hideFocusLoss = true,
-            hideWebViewVisibility = false,
-            hideLifecycleLoss = false,
+            hideWebViewVisibility = true,
+            hideLifecycleLoss = true,
             hideMultiWindowPip = true,
             spoofPinnedInsets = false,
             stripFlagSecure = false,
@@ -2027,6 +2267,154 @@ data class GranularHookState(
 
     fun matchingPreset(): HookPreset? =
         HookPreset.entries.firstOrNull { this == this.withPreset(it) }
+
+    fun pruneUnusedHooks(loggedEntries: List<HookLogEntry>): Pair<GranularHookState, Int> {
+        val activeMethods = loggedEntries
+            .filter { it.count > 0L }
+            .map { it.category to it.method }
+
+        fun hasHit(predicate: (category: String, method: String) -> Boolean): Boolean =
+            activeMethods.any { (c, m) -> predicate(c, m) }
+
+        val next = copy(
+            hideFocusLoss = hideFocusLoss && hasHit { c, m ->
+                c == "focus" &&
+                    !m.startsWith("OnAudioFocusChange") &&
+                    !m.contains("MultiWindow") &&
+                    !m.contains("PictureInPicture")
+            },
+            hideWebViewVisibility = hideWebViewVisibility && hasHit { c, _ -> c == "webview" },
+            hideLifecycleLoss = hideLifecycleLoss && hasHit { c, _ -> c == "lifecycle" },
+            hideMultiWindowPip = hideMultiWindowPip && hasHit { _, m ->
+                m.contains("MultiWindow") || m.contains("PictureInPicture")
+            },
+            spoofPinnedInsets = spoofPinnedInsets && hasHit { _, m -> m.startsWith("WindowInsets.") },
+            stripFlagSecure = stripFlagSecure && hasHit { _, m ->
+                m.contains("FLAG_SECURE") || m.startsWith("SurfaceView.setSecure")
+            },
+            hideAccessibilityOverlays = hideAccessibilityOverlays && hasHit { _, m ->
+                m.startsWith("AccessibilityManager.") || m.startsWith("Settings.canDrawOverlays")
+            },
+            retainAudioFocus = retainAudioFocus && hasHit { _, m -> m.startsWith("OnAudioFocusChange") },
+            cloakPackagesInstaller = cloakPackagesInstaller && hasHit { _, m -> m.startsWith("PackageManager.") },
+            sanitizeStackTraces = sanitizeStackTraces && hasHit { _, m -> m.endsWith(".getStackTrace()") },
+            spoofMotionSensors = spoofMotionSensors && hasHit { _, m -> m.startsWith("Sensor.") },
+            bypassVirtualDisplays = bypassVirtualDisplays && hasHit { _, m ->
+                m.startsWith("DisplayManager.") || m.startsWith("DisplayListener.")
+            },
+            unblockClipboard = unblockClipboard && hasHit { _, m -> m.startsWith("ClipboardManager.") },
+            spoofPackageSignature = spoofPackageSignature && hasHit { _, m ->
+                m.startsWith("PackageInfo.signatures") || m.startsWith("SigningInfo.")
+            },
+            softFailIntegrity = softFailIntegrity && hasHit { _, m -> m.startsWith("PlayIntegrity.") },
+            hookActivityLockTask = hookActivityLockTask && hasHit { c, m ->
+                c == "pin" && m.startsWith("Activity.")
+            },
+            hookActivityManagerState = hookActivityManagerState && hasHit { c, m ->
+                c == "pin" && m.startsWith("ActivityManager.")
+            },
+            hookActivityClient = hookActivityClient && hasHit { c, m ->
+                c == "pin" && m.startsWith("ActivityClient.")
+            },
+            hookBinderProxies = hookBinderProxies && hasHit { c, m ->
+                c == "pin" && (m.startsWith("IActivityTaskManager.") || m.startsWith("IActivityManager."))
+            },
+            hookSettingsLockToApp = hookSettingsLockToApp && hasHit { _, m -> m.startsWith("Settings.System.") },
+            hookDpmPermitted = hookDpmPermitted && hasHit { _, m -> m.startsWith("DevicePolicyManager.") }
+        )
+
+        val disabledCount = listOf(
+            hideFocusLoss to next.hideFocusLoss,
+            hideWebViewVisibility to next.hideWebViewVisibility,
+            hideLifecycleLoss to next.hideLifecycleLoss,
+            hideMultiWindowPip to next.hideMultiWindowPip,
+            spoofPinnedInsets to next.spoofPinnedInsets,
+            stripFlagSecure to next.stripFlagSecure,
+            hideAccessibilityOverlays to next.hideAccessibilityOverlays,
+            retainAudioFocus to next.retainAudioFocus,
+            cloakPackagesInstaller to next.cloakPackagesInstaller,
+            sanitizeStackTraces to next.sanitizeStackTraces,
+            spoofMotionSensors to next.spoofMotionSensors,
+            bypassVirtualDisplays to next.bypassVirtualDisplays,
+            unblockClipboard to next.unblockClipboard,
+            spoofPackageSignature to next.spoofPackageSignature,
+            softFailIntegrity to next.softFailIntegrity,
+            hookActivityLockTask to next.hookActivityLockTask,
+            hookActivityManagerState to next.hookActivityManagerState,
+            hookActivityClient to next.hookActivityClient,
+            hookBinderProxies to next.hookBinderProxies,
+            hookSettingsLockToApp to next.hookSettingsLockToApp,
+            hookDpmPermitted to next.hookDpmPermitted
+        ).count { (before, after) -> before && !after }
+
+        return next to disabledCount
+    }
+
+    fun toMorpheOptionsPairs(): List<Pair<String, String>> {
+        val timing = if (alwaysSpoofPinned) "always" else "reactive"
+        val items = mutableListOf(
+            "spoofTiming" to timing,
+            "hookActivityLockTask" to hookActivityLockTask.toString(),
+            "hookActivityManagerState" to hookActivityManagerState.toString(),
+            "hookBinderProxies" to hookBinderProxies.toString(),
+            "hideFocusLoss" to hideFocusLoss.toString(),
+            "hideWebViewVisibility" to hideWebViewVisibility.toString(),
+            "hideLifecycleLoss" to hideLifecycleLoss.toString(),
+            "hideMultiWindowAndPip" to hideMultiWindowPip.toString(),
+            "spoofPinnedInsets" to spoofPinnedInsets.toString(),
+            "stripFlagSecure" to stripFlagSecure.toString(),
+            "bypassVirtualDisplays" to bypassVirtualDisplays.toString(),
+            "unblockClipboard" to unblockClipboard.toString(),
+            "hideAccessibilityAndOverlays" to hideAccessibilityOverlays.toString(),
+            "retainAudioFocus" to retainAudioFocus.toString(),
+            "cloakPackagesAndInstaller" to cloakPackagesInstaller.toString(),
+            "sanitizeStackTraces" to sanitizeStackTraces.toString(),
+            "spoofMotionSensors" to spoofMotionSensors.toString(),
+            "spoofPackageSignature" to spoofPackageSignature.toString()
+        )
+        val cleanHex = spoofSignatureHex.replace(":", "").replace(" ", "").trim()
+        if (spoofPackageSignature && cleanHex.isNotEmpty()) {
+            items += "originalSignatureHex" to cleanHex
+        }
+        items += listOf(
+            "softFailIntegrityChecks" to softFailIntegrity.toString(),
+            "hookSettingsLockToApp" to hookSettingsLockToApp.toString(),
+            "hookDevicePolicyPermitted" to hookDpmPermitted.toString(),
+            "debugLogging" to debugLogging.toString()
+        )
+        return items
+    }
+
+    fun toMorpheCliFlags(): String =
+        toMorpheOptionsPairs().joinToString(" ") { (k, v) ->
+            if (k == "originalSignatureHex") "-O\$k=\\"\$v\\"" else "-O\$k=\$v"
+        }
+
+    fun toMorpheChecklist(): List<Pair<String, String>> = listOf(
+        "Spoof Timing Mode" to if (alwaysSpoofPinned) "Always Pinned (from launch)" else "Reactive (after startLockTask)",
+        "Disable Pinning (startLockTask / stopLockTask)" to if (hookActivityLockTask) "ON" else "OFF",
+        "Spoof ActivityManager Pin State" to if (hookActivityManagerState) "ON" else "OFF",
+        "Binder Stub\\\$Proxy LockTask Interception" to if (hookBinderProxies) "ON" else "OFF",
+        "Window Focus Spoofing (Safe)" to if (hideFocusLoss) "ON" else "OFF",
+        "WebView Visibility, JS & Pause Stealth" to if (hideWebViewVisibility) "ON" else "OFF",
+        "Suppress onPause / onStop" to if (hideLifecycleLoss) "ON" else "OFF",
+        "Hide Multi-Window & Picture-in-Picture" to if (hideMultiWindowPip) "ON" else "OFF",
+        "Simulate Pinned Window Insets" to if (spoofPinnedInsets) "ON" else "OFF",
+        "Strip FLAG_SECURE" to if (stripFlagSecure) "ON" else "OFF",
+        "Virtual Display & Screen Sharing Bypass" to if (bypassVirtualDisplays) "ON" else "OFF",
+        "Unblock Clipboard Clear" to if (unblockClipboard) "ON" else "OFF",
+        "Hide Accessibility & Overlay Checks" to if (hideAccessibilityOverlays) "ON" else "OFF",
+        "Retain Audio Focus" to if (retainAudioFocus) "ON" else "OFF",
+        "Cloak Packages & Play Store Installer" to if (cloakPackagesInstaller) "ON" else "OFF",
+        "Sanitize Stack Traces" to if (sanitizeStackTraces) "ON" else "OFF",
+        "Spoof Motion Sensors (Stationary)" to if (spoofMotionSensors) "ON" else "OFF",
+        "Static Package Signature Spoof" to if (spoofPackageSignature) "ON" else "OFF",
+        "Original Certificate DER Hex" to spoofSignatureHex.trim().ifEmpty { "(empty)" },
+        "Play Integrity / SafetyNet Soft-Fail" to if (softFailIntegrity) "ON" else "OFF",
+        "Spoof Settings.System lock_to_app_enabled" to if (hookSettingsLockToApp) "ON" else "OFF",
+        "Spoof DevicePolicyManager.isLockTaskPermitted" to if (hookDpmPermitted) "ON" else "OFF",
+        "Verbose Logcat Debug Logging" to if (debugLogging) "ON" else "OFF"
+    )
 
     fun toJson(targetPackage: String?): String = JSONObject().apply {
         put("schemaVersion", 3)
@@ -2299,6 +2687,13 @@ class PrefsManager(context: Context) {
         )
     }
 
+    fun getPackageHitTotal(packageName: String): Long =
+        statsPrefs.getLong("\$packageName::pin", 0L) +
+            statsPrefs.getLong("\$packageName::focus", 0L) +
+            statsPrefs.getLong("\$packageName::lifecycle", 0L) +
+            statsPrefs.getLong("\$packageName::webview", 0L) +
+            statsPrefs.getLong("\$packageName::cloak", 0L)
+
     fun loadEventLog(targetPackage: String?): List<HookLogEntry> {
         val raw = statsPrefs.getString("events_log", "[]") ?: "[]"
         val arr = runCatching { JSONArray(raw) }.getOrElse { return emptyList() }
@@ -2360,6 +2755,10 @@ class PrefsManager(context: Context) {
 function generateMainActivityKt(config: ModuleConfig, pkg: string): string {
   return `package ${pkg}
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -2388,21 +2787,27 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.Analytics
 import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.AspectRatio
+import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -2422,6 +2827,7 @@ import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -2490,7 +2896,8 @@ import ${pkg}.ui.PinSpoofTheme
 data class InstalledAppItem(
     val label: String,
     val packageName: String,
-    val hasOverride: Boolean
+    val hasOverride: Boolean,
+    val hitTotal: Long
 )
 
 class MainActivity : ComponentActivity() {
@@ -2587,6 +2994,15 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     var showAppPicker by remember { mutableStateOf(false) }
     var showEventLogSheet by remember { mutableStateOf(false) }
     var eventLogFilter by remember { mutableStateOf("all") }
+    var morpheOptionsTarget by remember { mutableStateOf<Pair<String, GranularHookState>?>(null) }
+
+    fun copyMorpheCliOptions(label: String, state: GranularHookState) {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        cm?.setPrimaryClip(ClipData.newPlainText("\$label Morphe CLI Options", state.toMorpheCliFlags()))
+        scope.launch {
+            snackbarHostState.showSnackbar("Copied Morphe CLI -O options for \$label")
+        }
+    }
 
     DisposableEffect(prefsManager, selectedPkg, lifecycleOwner) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
@@ -2815,6 +3231,38 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             }
                         }
 
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { copyMorpheCliOptions(selectedLabel, hookState) },
+                                shape = RoundedCornerShape(16.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onSurface
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Rounded.ContentCopy, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.size(6.dp))
+                                Text("Copy Morphe CLI", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            OutlinedButton(
+                                onClick = { morpheOptionsTarget = selectedLabel to hookState },
+                                shape = RoundedCornerShape(16.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onSurface
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.size(6.dp))
+                                Text("Morphe Checklist", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+
                         if (selectedPkg != null) {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -3040,15 +3488,15 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         ExpressiveToggleRow(
                             icon = Icons.Rounded.Language,
                             title = "WebView Visibility, JS & Pause Stealth",
-                            subtitle = "Force View.VISIBLE, block WebView.onPause()/pauseTimers(), and spoof JS document.hidden / visibilityState / blur",
+                            subtitle = "Force View.VISIBLE, block WebView.onPause()/pauseTimers()/onVisibilityAggregated(false), and spoof JS visibility/blur",
                             checked = hookState.hideWebViewVisibility,
                             onCheckedChange = { v -> updateState { it.copy(hideWebViewVisibility = v) } }
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         ExpressiveToggleRow(
                             icon = Icons.Rounded.PauseCircleOutline,
-                            title = "Suppress onPause / onStop (Advanced)",
-                            subtitle = "OFF by default: blocking Activity/LifecycleRegistry transitions can stall SurfaceView/TextureView graphics on resume",
+                            title = "Suppress onPause / onStop",
+                            subtitle = "Block Activity/Fragment/LifecycleRegistry transitions to hide Recents & switching (disable or use Light preset if a SurfaceView/game stalls)",
                             checked = hookState.hideLifecycleLoss,
                             onCheckedChange = { v -> updateState { it.copy(hideLifecycleLoss = v) } }
                         )
@@ -3265,51 +3713,70 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
 
     // Inline Expandable App Rules + Per-App Presets Sheet
     if (showAppPicker) {
-        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
         var query by remember { mutableStateOf("") }
+        var appFilter by remember { mutableStateOf("all") }
         var expandedPkg by remember { mutableStateOf<String?>(selectedPkg) }
         val appStatesMap = remember { mutableStateMapOf<String, GranularHookState>() }
         val overrideMap = remember { mutableStateMapOf<String, Boolean>() }
 
         val installedApps = remember {
             val pm = context.packageManager
+            val launchablePkgs = runCatching {
+                val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                pm.queryIntentActivities(intent, 0).mapNotNullTo(HashSet()) { it.activityInfo?.packageName }
+            }.getOrDefault(emptySet())
+
             pm.getInstalledApplications(PackageManager.GET_META_DATA)
                 .asSequence()
-                .filter {
-                    it.packageName != HookConfig.MODULE_PKG &&
-                        it.packageName != "android" &&
-                        (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0
-                }
-                .map {
-                    val hasCustom = prefsManager.hasPerAppOverride(it.packageName)
-                    overrideMap[it.packageName] = hasCustom
+                .mapNotNull { info ->
+                    val pName = info.packageName
+                    if (pName == HookConfig.MODULE_PKG || pName == "android") return@mapNotNull null
+                    val hasCustom = prefsManager.hasPerAppOverride(pName)
+                    val hitTotal = prefsManager.getPackageHitTotal(pName)
+                    val isUserOrLaunchable = (info.flags and ApplicationInfo.FLAG_SYSTEM) == 0 ||
+                        pName in launchablePkgs ||
+                        hasCustom ||
+                        hitTotal > 0L
+                    if (!isUserOrLaunchable) return@mapNotNull null
+                    overrideMap[pName] = hasCustom
                     InstalledAppItem(
-                        label = pm.getApplicationLabel(it).toString(),
-                        packageName = it.packageName,
-                        hasOverride = hasCustom
+                        label = pm.getApplicationLabel(info).toString(),
+                        packageName = pName,
+                        hasOverride = hasCustom,
+                        hitTotal = hitTotal
                     )
                 }
-                .sortedWith(compareByDescending<InstalledAppItem> { it.hasOverride }.thenBy { it.label })
+                .sortedWith(compareBy<InstalledAppItem> { it.label.lowercase() }.thenBy { it.packageName })
                 .toList()
         }
 
-        val filtered = remember(query, installedApps, overrideMap.toMap()) {
-            val baseList = if (query.isBlank()) installedApps
-            else installedApps.filter {
-                it.label.contains(query, ignoreCase = true) ||
-                    it.packageName.contains(query, ignoreCase = true)
+        val modifiedCount = remember(overrideMap.toMap()) {
+            installedApps.count { overrideMap[it.packageName] == true }
+        }
+        val activeHitsCount = remember(installedApps) {
+            installedApps.count { it.hitTotal > 0L }
+        }
+
+        val filtered = remember(query, appFilter, installedApps, overrideMap.toMap()) {
+            installedApps.filter { app ->
+                val matchesTab = when (appFilter) {
+                    "modified" -> overrideMap[app.packageName] == true
+                    "active" -> app.hitTotal > 0L
+                    else -> true
+                }
+                if (!matchesTab) return@filter false
+                if (query.isBlank()) true
+                else app.label.contains(query, ignoreCase = true) ||
+                    app.packageName.contains(query, ignoreCase = true)
             }
-            baseList.sortedWith(
-                compareByDescending<InstalledAppItem> { overrideMap[it.packageName] == true }
-                    .thenBy { it.label }
-            )
         }
 
         ModalBottomSheet(
             onDismissRequest = { showAppPicker = false },
             sheetState = sheetState
         ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.fillMaxSize()) {
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -3340,15 +3807,35 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         shape = RoundedCornerShape(18.dp),
                         modifier = Modifier.fillMaxWidth()
                     )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        FilterChip(
+                            selected = appFilter == "all",
+                            onClick = { appFilter = "all" },
+                            label = { Text("All (\${installedApps.size})") }
+                        )
+                        FilterChip(
+                            selected = appFilter == "modified",
+                            onClick = { appFilter = "modified" },
+                            label = { Text("Modified (\$modifiedCount)") }
+                        )
+                        FilterChip(
+                            selected = appFilter == "active",
+                            onClick = { appFilter = "active" },
+                            label = { Text("Active Hits (\$activeHitsCount)") }
+                        )
+                    }
                 }
 
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(10.dp))
 
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(460.dp),
-                    contentPadding = PaddingValues(horizontal = 20.dp, vertical = 4.dp),
+                        .weight(1f),
+                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 24.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     items(filtered, key = { it.packageName }) { app ->
@@ -3387,7 +3874,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                                 ) {
                                     AppIconView(
                                         packageName = app.packageName,
@@ -3414,6 +3901,21 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
+                                    }
+
+                                    if (app.hitTotal > 0L) {
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.8f)
+                                        ) {
+                                            Text(
+                                                text = "\${app.hitTotal} hits",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
                                     }
 
                                     if (isCustom) {
@@ -3544,6 +4046,30 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                             }
                                         )
 
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            OutlinedButton(
+                                                onClick = { copyMorpheCliOptions(app.label, appState) },
+                                                shape = RoundedCornerShape(14.dp),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(Icons.Rounded.ContentCopy, null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.size(6.dp))
+                                                Text("Copy Morphe CLI", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            }
+                                            OutlinedButton(
+                                                onClick = { morpheOptionsTarget = app.label to appState },
+                                                shape = RoundedCornerShape(14.dp),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.size(6.dp))
+                                                Text("Checklist", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            }
+                                        }
+
                                         FilledTonalButton(
                                             onClick = {
                                                 if (!isCustom) {
@@ -3566,14 +4092,13 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         }
                     }
                 }
-                Spacer(Modifier.height(20.dp))
             }
         }
     }
 
     // Live Hook Event Log Drawer (opened by tapping any StatTile)
     if (showEventLogSheet) {
-        val logSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val logSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
         val filterChips = listOf(
             "all" to "All",
             "pin" to "Pinning",
@@ -3594,7 +4119,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         ) {
             Column(
                 modifier = Modifier
-                    .fillMaxWidth()
+                    .fillMaxSize()
                     .padding(horizontal = 20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
@@ -3642,35 +4167,179 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                     }
                 }
 
-                if (filteredEntries.isEmpty()) {
+                FilledTonalButton(
+                    onClick = {
+                        if (eventLog.isEmpty()) {
+                            scope.launch {
+                                snackbarHostState.showSnackbar("No recorded hits yet — launch the target app first")
+                            }
+                            return@FilledTonalButton
+                        }
+                        val (prunedState, disabledCount) = hookState.pruneUnusedHooks(eventLog)
+                        updateState { prunedState }
+                        scope.launch {
+                            snackbarHostState.showSnackbar(
+                                if (disabledCount > 0) {
+                                    "Kept active hooks for \$selectedLabel · disabled \$disabledCount unused"
+                                } else {
+                                    "All enabled hooks already have active hits"
+                                }
+                            )
+                        }
+                    },
+                    enabled = eventLog.isNotEmpty(),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoFixHigh,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.size(8.dp))
+                    Text("Keep Active Only (Prune 0-Hit Hooks)")
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) {
+                    if (filteredEntries.isEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(
+                                text = "No hook events recorded for this filter yet. Launch a scoped target app and trigger pinning or focus transitions.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(16.dp)
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = 24.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(filteredEntries) { entry ->
+                                EventLogRow(entry = entry, formattedTime = timeFmt.format(Date(entry.timestampMs)))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Morphe CLI & Manager Checklist Dialog
+    morpheOptionsTarget?.let { (targetTitle, targetState) ->
+        val cliFlags = remember(targetState) { targetState.toMorpheCliFlags() }
+        val checklist = remember(targetState) { targetState.toMorpheChecklist() }
+
+        AlertDialog(
+            onDismissRequest = { morpheOptionsTarget = null },
+            title = {
+                Column {
+                    Text("Morphe Patch Options", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = targetTitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Morphe Desktop CLI (-O Flags)",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
                     Surface(
-                        shape = RoundedCornerShape(18.dp),
+                        shape = RoundedCornerShape(12.dp),
                         color = MaterialTheme.colorScheme.surfaceContainerHigh,
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
-                            text = "No hook events recorded for this filter yet. Launch a scoped target app and trigger pinning or focus transitions.",
+                            text = cliFlags,
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(16.dp)
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(12.dp)
                         )
                     }
-                } else {
-                    LazyColumn(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(360.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        items(filteredEntries) { entry ->
-                            EventLogRow(entry = entry, formattedTime = timeFmt.format(Date(entry.timestampMs)))
+
+                    Text(
+                        text = "Morphe Manager Checklist",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        checklist.forEach { (optName, optValue) ->
+                            val isActiveVal = optValue == "ON" || optValue.startsWith("Always")
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = optName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 8.dp)
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isActiveVal) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceContainerHighest
+                                    }
+                                ) {
+                                    Text(
+                                        text = optValue,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = if (isActiveVal) {
+                                            MaterialTheme.colorScheme.onPrimaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
                         }
                     }
                 }
-
-                Spacer(Modifier.height(16.dp))
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        copyMorpheCliOptions(targetTitle, targetState)
+                        morpheOptionsTarget = null
+                    }
+                ) {
+                    Text("Copy -O Flags")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { morpheOptionsTarget = null }) {
+                    Text("Close")
+                }
             }
-        }
+        )
     }
 }
 
@@ -4120,7 +4789,7 @@ function generateProguardRules(pkg: string): string {
 
 function generateGithubWorkflow(config: ModuleConfig): string {
   const folderName = config.moduleName.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'PinSpoof';
-  const ver = config.versionName.trim() || '1.2.0';
+  const ver = config.versionName.trim() || '1.3.2';
   return `name: Build ${config.moduleName} APK & Morphe Patches
 
 on:
@@ -4369,14 +5038,14 @@ val pinSpoofPatch = bytecodePatch(
         key = "hideWebViewVisibility",
         default = ${config.hideWebViewVisibility},
         title = "WebView Visibility, JS & Pause Stealth",
-        description = "Force WebView visibility VISIBLE, block WebView.onPause()/pauseTimers(), and inject DOM Page Visibility / blur stealth JS.",
+        description = "Force WebView visibility VISIBLE, block WebView.onPause()/pauseTimers()/onVisibilityAggregated(false), and inject DOM visibility/blur stealth JS.",
     )
 
     val hideLifecycleLoss by booleanOption(
         key = "hideLifecycleLoss",
         default = ${config.hideLifecycleLoss},
-        title = "Suppress onPause / onStop (Advanced)",
-        description = "OFF by default: block Activity/Fragment onPause(), onStop(), ActivityLifecycleCallbacks, and LifecycleRegistry transitions.",
+        title = "Suppress onPause / onStop",
+        description = "Block Activity/Fragment onPause(), onStop(), ActivityLifecycleCallbacks, and LifecycleRegistry transitions (disable if a SurfaceView/game stalls on resume).",
     )
 
     val hideMultiWindowAndPip by booleanOption(
@@ -4576,6 +5245,13 @@ val pinSpoofPatch = bytecodePatch(
                 matchesReceiver = { isViewType(it) },
                 targetMethod = "\$EXTENSION_CLASS->hasWindowFocus(Landroid/view/View;)Z",
             )
+            rewriteInstanceCalls(
+                methodName = "getRunningAppProcesses",
+                parameters = emptyList(),
+                returnType = "Ljava/util/List;",
+                matchesReceiver = { it == "Landroid/app/ActivityManager;" },
+                targetMethod = "\$EXTENSION_CLASS->getRunningAppProcesses(Landroid/app/ActivityManager;)Ljava/util/List;",
+            )
             methodCall(
                 smali = "Landroid/app/ActivityManager;->getMyMemoryState(Landroid/app/ActivityManager\\\$RunningAppProcessInfo;)V"
             ).matchAllMethodIndicesForEach(requireMatches = false) { index ->
@@ -4602,6 +5278,34 @@ val pinSpoofPatch = bytecodePatch(
                 returnType = "V",
                 matchesReceiver = { isWebViewType(it) },
                 targetMethod = "\$EXTENSION_CLASS->onWebViewPauseTimers(Landroid/webkit/WebView;)V",
+            )
+            rewriteInstanceCalls(
+                methodName = "getWindowVisibility",
+                parameters = emptyList(),
+                returnType = "I",
+                matchesReceiver = { isWebViewType(it) },
+                targetMethod = "\$EXTENSION_CLASS->getWebViewWindowVisibility(Landroid/webkit/WebView;)I",
+            )
+            rewriteInstanceCalls(
+                methodName = "setWebViewClient",
+                parameters = listOf("Landroid/webkit/WebViewClient;"),
+                returnType = "V",
+                matchesReceiver = { isWebViewType(it) },
+                targetMethod = "\$EXTENSION_CLASS->onWebViewSetClient(Landroid/webkit/WebView;Landroid/webkit/WebViewClient;)V",
+            )
+            rewriteInstanceCalls(
+                methodName = "loadUrl",
+                parameters = listOf("Ljava/lang/String;"),
+                returnType = "V",
+                matchesReceiver = { isWebViewType(it) },
+                targetMethod = "\$EXTENSION_CLASS->onWebViewLoadUrl(Landroid/webkit/WebView;Ljava/lang/String;)V",
+            )
+            rewriteInstanceCalls(
+                methodName = "loadUrl",
+                parameters = listOf("Ljava/lang/String;", "Ljava/util/Map;"),
+                returnType = "V",
+                matchesReceiver = { isWebViewType(it) },
+                targetMethod = "\$EXTENSION_CLASS->onWebViewLoadUrl(Landroid/webkit/WebView;Ljava/lang/String;Ljava/util/Map;)V",
             )
         }
 
@@ -4998,6 +5702,8 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
     val webViewClientTargets = mutableListOf<ClassDef>()
     val lifecycleCallbackTargets = mutableListOf<ClassDef>()
     val focusListenerTargets = mutableListOf<ClassDef>()
+    val windowFocusHolderTargets = mutableListOf<ClassDef>()
+    val broadcastReceiverTargets = mutableListOf<ClassDef>()
     val audioListenerTargets = mutableListOf<ClassDef>()
     val sensorListenerTargets = mutableListOf<ClassDef>()
     val displayListenerTargets = mutableListOf<ClassDef>()
@@ -5035,20 +5741,25 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
             val hasViewHook = classDef.methods.any { m ->
                 m.implementation != null && (
                     (hideFocus && m.name == "onWindowFocusChanged" && m.parameterTypes == listOf("Z") && m.returnType == "V") ||
-                        (hideWebView && m.name == "onWindowVisibilityChanged" && m.parameterTypes == listOf("I") && m.returnType == "V")
+                        (hideWebView && ((m.name == "onWindowVisibilityChanged" && m.parameterTypes == listOf("I") && m.returnType == "V") ||
+                            (m.name == "onVisibilityAggregated" && m.parameterTypes == listOf("Z") && m.returnType == "V")))
                     )
             }
             if (hasViewHook) viewTargets += classDef
         }
 
         if (hideWebView && isWebViewClientType(type)) {
-            val hasPageFinished = classDef.methods.any { m ->
-                m.implementation != null &&
-                    m.name == "onPageFinished" &&
-                    m.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;") &&
-                    m.returnType == "V"
+            val hasWebCb = classDef.methods.any { m ->
+                m.implementation != null && (
+                    (m.name == "onPageFinished" &&
+                        m.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;") &&
+                        m.returnType == "V") ||
+                        (m.name == "onPageStarted" &&
+                            m.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;", "Landroid/graphics/Bitmap;") &&
+                            m.returnType == "V")
+                    )
             }
-            if (hasPageFinished) webViewClientTargets += classDef
+            if (hasWebCb) webViewClientTargets += classDef
         }
 
         if (hideLifecycle && "Landroid/app/Application\\\$ActivityLifecycleCallbacks;" in classDef.interfaces) {
@@ -5069,6 +5780,28 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
                     m.returnType == "V"
             }
             if (hasListener) focusListenerTargets += classDef
+        }
+
+        if (hideFocus && !isActivityType(type) && !isViewType(type) &&
+            (hasAncestorIn(type, setOf("Landroid/app/Dialog;")) || "Landroid/view/Window\\\$Callback;" in classDef.interfaces)
+        ) {
+            val hasFocusCb = classDef.methods.any { m ->
+                m.implementation != null &&
+                    m.name == "onWindowFocusChanged" &&
+                    m.parameterTypes == listOf("Z") &&
+                    m.returnType == "V"
+            }
+            if (hasFocusCb) windowFocusHolderTargets += classDef
+        }
+
+        if (hideFocus && hasAncestorIn(type, setOf("Landroid/content/BroadcastReceiver;"))) {
+            val hasOnReceive = classDef.methods.any { m ->
+                m.implementation != null &&
+                    m.name == "onReceive" &&
+                    m.parameterTypes == listOf("Landroid/content/Context;", "Landroid/content/Intent;") &&
+                    m.returnType == "V"
+            }
+            if (hasOnReceive) broadcastReceiverTargets += classDef
         }
 
         if (retainAudio && "Landroid/media/AudioManager\\\$OnAudioFocusChangeListener;" in classDef.interfaces) {
@@ -5172,6 +5905,12 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
                 method.returnType == "V"
             ) {
                 forceWindowVisibilityVisible(method)
+            } else if (hideWebView &&
+                method.name == "onVisibilityAggregated" &&
+                method.parameterTypes == listOf("Z") &&
+                method.returnType == "V"
+            ) {
+                forceVisibilityAggregatedTrue(method)
             }
         }
     }
@@ -5180,9 +5919,12 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
         val mutable = mutableClassDefBy(classDef)
         for (method in mutable.methods.toList()) {
             if (method.implementation == null) continue
-            if (method.name == "onPageFinished" &&
-                method.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;") &&
-                method.returnType == "V"
+            if ((method.name == "onPageFinished" &&
+                    method.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;") &&
+                    method.returnType == "V") ||
+                (method.name == "onPageStarted" &&
+                    method.parameterTypes == listOf("Landroid/webkit/WebView;", "Ljava/lang/String;", "Landroid/graphics/Bitmap;") &&
+                    method.returnType == "V")
             ) {
                 method.addInstructions(
                     0,
@@ -5214,6 +5956,32 @@ private fun BytecodePatchContext.patchAppSubclassOverrides(
                 method.returnType == "V"
             ) {
                 skipWhenBooleanParamFalse(method)
+            }
+        }
+    }
+
+    windowFocusHolderTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if (method.name == "onWindowFocusChanged" &&
+                method.parameterTypes == listOf("Z") &&
+                method.returnType == "V"
+            ) {
+                skipWhenBooleanParamFalse(method)
+            }
+        }
+    }
+
+    broadcastReceiverTargets.forEach { classDef ->
+        val mutable = mutableClassDefBy(classDef)
+        for (method in mutable.methods.toList()) {
+            if (method.implementation == null) continue
+            if (method.name == "onReceive" &&
+                method.parameterTypes == listOf("Landroid/content/Context;", "Landroid/content/Intent;") &&
+                method.returnType == "V"
+            ) {
+                suppressCloseSystemDialogsBroadcast(method)
             }
         }
     }
@@ -5317,6 +6085,57 @@ private fun forceWindowVisibilityVisible(method: MutableMethod) {
             move-result p1
         """.trimIndent(),
     )
+}
+
+private fun forceVisibilityAggregatedTrue(method: MutableMethod) {
+    method.addInstructions(
+        0,
+        """
+            invoke-static/range { p1 .. p1 }, \$EXTENSION_CLASS->filterVisibilityAggregated(Z)Z
+            move-result p1
+        """.trimIndent(),
+    )
+}
+
+private fun BytecodePatchContext.suppressCloseSystemDialogsBroadcast(method: MutableMethod) {
+    val impl = method.implementation ?: return
+    val origP0 = method.p0Register
+    val paramRegs = if (origP0 < impl.registerCount) {
+        IntArray(impl.registerCount - origP0) { origP0 + it }
+    } else {
+        intArrayOf()
+    }
+    val free = runCatching { method.findFreeRegister(0, *paramRegs) }.getOrNull()
+    if (free != null && free < 256) {
+        method.addInstructions(
+            0,
+            """
+                invoke-static/range { p2 .. p2 }, \$EXTENSION_CLASS->shouldSuppressBroadcast(Landroid/content/Intent;)Z
+                move-result v\$free
+                if-eqz v\$free, :pinspoof_orig
+                return-void
+                :pinspoof_orig
+                nop
+            """.trimIndent(),
+        )
+        return
+    }
+    if (impl.registerCount < 250) {
+        val cloned = method.cloneParameters()
+        val insertIdx = cloned.numberOfParameterRegistersLogical
+        val intentReg = "v\${origP0 + 2}"
+        cloned.addInstructions(
+            insertIdx,
+            """
+                invoke-static/range { \$intentReg .. \$intentReg }, \$EXTENSION_CLASS->shouldSuppressBroadcast(Landroid/content/Intent;)Z
+                move-result p0
+                if-eqz p0, :pinspoof_orig
+                return-void
+                :pinspoof_orig
+                nop
+            """.trimIndent(),
+        )
+    }
 }
 
 private fun BytecodePatchContext.suppressAudioFocusLoss(method: MutableMethod) {
@@ -5440,6 +6259,7 @@ import android.hardware.SensorManager;
 import android.hardware.TriggerEventListener;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
+import android.os.Process;
 import android.provider.Settings;
 import android.util.Log;
 import android.view.Display;
@@ -5450,12 +6270,14 @@ import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityManager;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -5478,12 +6300,17 @@ public final class PinSpoofHooks {
                     + "try{document.hasFocus=function(){return true;};}catch(e){}"
                     + "try{"
                     + "var s=function(e){"
-                    + "if(e.type==='blur'&&e.target!==window&&e.target!==document)return;"
+                    + "if((e.type==='blur'||e.type==='focusout')&&e.target!==window&&e.target!==document)return;"
                     + "e.stopImmediatePropagation();"
                     + "};"
                     + "window.addEventListener('blur',s,true);"
+                    + "window.addEventListener('focusout',s,true);"
+                    + "window.addEventListener('pagehide',s,true);"
+                    + "document.addEventListener('blur',s,true);"
+                    + "document.addEventListener('focusout',s,true);"
                     + "document.addEventListener('visibilitychange',s,true);"
                     + "document.addEventListener('webkitvisibilitychange',s,true);"
+                    + "document.addEventListener('freeze',s,true);"
                     + "}catch(e){}"
                     + "})();";
 
@@ -5585,11 +6412,68 @@ public final class PinSpoofHooks {
         }
     }
 
+    public static List<ActivityManager.RunningAppProcessInfo> getRunningAppProcesses(ActivityManager am) {
+        if (am == null) {
+            return Collections.emptyList();
+        }
+        List<ActivityManager.RunningAppProcessInfo> list = am.getRunningAppProcesses();
+        if (list != null) {
+            int myPid = Process.myPid();
+            for (ActivityManager.RunningAppProcessInfo info : list) {
+                if (info != null && info.pid == myPid) {
+                    info.importance = ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
+                    info.importanceReasonCode = ActivityManager.RunningAppProcessInfo.REASON_UNKNOWN;
+                }
+            }
+        }
+        return list;
+    }
+
+    public static boolean shouldSuppressBroadcast(Intent intent) {
+        boolean suppress = intent != null && Intent.ACTION_CLOSE_SYSTEM_DIALOGS.equals(intent.getAction());
+        if (suppress) {
+            log("Suppressed Intent.ACTION_CLOSE_SYSTEM_DIALOGS broadcast");
+        }
+        return suppress;
+    }
+
     public static int filterWindowVisibility(int visibility) {
         if (visibility != View.VISIBLE) {
             log("View/WebView window visibility coerced to View.VISIBLE");
         }
         return View.VISIBLE;
+    }
+
+    public static int getWebViewWindowVisibility(WebView webView) {
+        return View.VISIBLE;
+    }
+
+    public static boolean filterVisibilityAggregated(boolean isVisible) {
+        if (!isVisible) {
+            log("WebView onVisibilityAggregated(false) coerced to true");
+        }
+        return true;
+    }
+
+    public static void onWebViewSetClient(WebView webView, WebViewClient client) {
+        if (webView != null) {
+            webView.setWebViewClient(client);
+            injectWebViewStealth(webView);
+        }
+    }
+
+    public static void onWebViewLoadUrl(WebView webView, String url) {
+        if (webView != null) {
+            webView.loadUrl(url);
+            injectWebViewStealth(webView);
+        }
+    }
+
+    public static void onWebViewLoadUrl(WebView webView, String url, Map<String, String> headers) {
+        if (webView != null) {
+            webView.loadUrl(url, headers);
+            injectWebViewStealth(webView);
+        }
     }
 
     public static void injectWebViewStealth(final WebView webView) {
@@ -6227,7 +7111,7 @@ private class JsonCompatibility(
 
 function generateReadme(config: ModuleConfig, pkg: string): string {
   const folderName = config.moduleName.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'PinSpoof';
-  const ver = config.versionName.trim() || '1.3.0';
+  const ver = config.versionName.trim() || '1.3.2';
   return `# ${config.moduleName}
 
 App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundle (\`${folderName}-v${ver}.apk\` / \`${folderName}-v${ver}.mpp\`) targeting **Android 7.0 – Android 16 (API ${config.minSdk}–${config.targetSdk})**:
@@ -6235,17 +7119,17 @@ App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundl
 1. **Disables System App Pinning**: Intercepts \`Activity.startLockTask()\`, \`Activity.stopLockTask()\`, \`ActivityClient\`, and optional Binder \`Stub\$Proxy\` calls (with dynamic OEM-safe method scanning) locally within the target app's ART process without modifying \`system_server\`.
 2. **Emulates Pinned State**: Reports \`ActivityManager.getLockTaskModeState()\` -> \`LOCK_TASK_MODE_PINNED\` (\`2\`) and \`isInLockTaskMode()\` -> \`true\` in safe **Reactive** mode by default (or optional **Always Pinned**), alongside optional \`Settings.System\` (\`lock_to_app_enabled\`) and \`DevicePolicyManager.isLockTaskPermitted()\` overrides.
 3. **Preserves Foreground, WebView & Display State**:
-   - **Window Focus Spoofing (Safe Default)**: Drops \`View.dispatchWindowFocusChanged(false)\`, \`ViewTreeObserver\`, \`DecorView\`, \`Activity.performTopResumedActivityChanged(false)\`, safe \`onUserLeaveHint()\`, maintains \`hasWindowFocus() -> true\`, and keeps \`ActivityManager.getMyMemoryState()\` at \`IMPORTANCE_FOREGROUND\`.
-   - **WebView Visibility, JS & Pause Stealth (Opt-in)**: Forces \`WebView\` visibility \`VISIBLE\`, blocks \`WebView.onPause()\` / \`pauseTimers()\`, and injects DOM stealth (\`document.hidden = false\`, \`document.visibilityState = "visible"\`, \`document.hasFocus = () => true\`, \`visibilitychange\` / \`blur\` suppression).
-   - **Lifecycle Suppression (Advanced Opt-in)**: Off by default to prevent \`SurfaceView\` / \`TextureView\` graphics stalls when resuming from Recents; optionally blocks \`onPause()\`, \`onStop()\`, \`Application.ActivityLifecycleCallbacks\`, and \`LifecycleRegistry\` (\`ON_PAUSE\`/\`ON_STOP\`).
+   - **Window Focus Spoofing (Safe Default)**: Drops \`View.dispatchWindowFocusChanged(false)\`, \`ViewTreeObserver\`, \`DecorView\`, \`Dialog\`/\`Window.Callback\`, \`Activity.performTopResumedActivityChanged(false)\`, \`ACTION_CLOSE_SYSTEM_DIALOGS\` broadcasts, safe \`onUserLeaveHint()\`, maintains \`hasWindowFocus() -> true\`, and keeps \`ActivityManager.getMyMemoryState()\` / \`getRunningAppProcesses()\` at \`IMPORTANCE_FOREGROUND\`.
+   - **WebView Visibility, JS & Pause Stealth**: Forces \`WebView\` visibility \`VISIBLE\`, blocks \`WebView.onPause()\` / \`pauseTimers()\` / \`onVisibilityAggregated(false)\`, and injects DOM stealth (\`document.hidden = false\`, \`document.visibilityState = "visible"\`, \`document.hasFocus = () => true\`, \`visibilitychange\` / \`blur\` / \`focusout\` / \`pagehide\` / \`freeze\` suppression).
+   - **Lifecycle Suppression**: Enabled by default in \`Balanced\` and Morphe for complete Recents stealth; blocks \`onPause()\`, \`onStop()\`, \`Fragment\` transitions, \`Application.ActivityLifecycleCallbacks\`, and \`LifecycleRegistry\` (\`ON_PAUSE\`/\`ON_STOP\`). Disable or switch to \`Light\` if a \`SurfaceView\`/game stalls on resume.
    - **Display, Media & UI Bypass**: Simulate zeroed pinned \`WindowInsets\`, strip \`FLAG_SECURE\`, expose only \`Display.DEFAULT_DISPLAY\` for virtual/screen-sharing bypass, unblock \`ClipboardManager.clearPrimaryClip()\`, hide \`AccessibilityManager\` / overlay checks, and retain \`AudioManager\` focus.
 4. **Anti-Detection & Integrity Cloaking**:
    - **Package & Installer Cloaking**: Report \`com.android.vending\` as installer and hide Xposed / LSPosed / Morphe manager packages from \`PackageManager\`.
    - **Stack Trace Sanitization & Motion Sensors**: Strip hook frames from \`Thread\` / \`Throwable.getStackTrace()\` and clamp accelerometer/gyroscope readings to resting desk values.
    - **Signature & Play Integrity Handling**: Optional \`PackageInfo.signatures\` / \`SigningInfo\` replacement via Certificate DER Hex and soft-fail clearing on Integrity / SafetyNet \`Task.getException()\`.
 5. **Accessible Anywhere**:
-   - **Morphe Patching (No Root / No Xposed)**: All controls are exposed directly as **Morphe Patching Options** inside \`${folderName}-v${ver}.mpp\` (universal patch, works on any APK).
-   - **LSPosed Xposed + Material 3 Expressive UI**: Inline expandable per-app rules & presets (\`Light\`, \`Balanced\`, \`Aggressive\`), JSON export/import, and a tappable **Live Hook Event Counter** & method event log drawer via \`xposedsharedprefs\`.
+   - **Morphe Patching (No Root / No Xposed)**: All controls are exposed directly as **Morphe Patching Options** inside \`${folderName}-v${ver}.mpp\` (universal patch, works on any APK). Export per-app LSPosed configs straight to **Morphe CLI \`-O\` flags** or view an interactive **Morphe Manager Checklist**.
+   - **LSPosed Xposed + Material 3 Expressive UI**: Searchable & filterable app picker (\`All\`, \`Modified\`, \`Active Hits\`), inline expandable per-app rules & presets (\`Light\`, \`Balanced\`, \`Aggressive\`), JSON export/import, and a tappable **Live Hook Event Counter** with **Keep Active Only (Prune 0-Hit Hooks)** via \`xposedsharedprefs\`.
 
 ## Practical Usage
 
@@ -6254,7 +7138,7 @@ ${config.moduleName} lets you stay in control of multitasking and system navigat
 - **Keep Android Navigation & Recents Unlocked**: Prevent apps from locking your device into Screen Pinning so the Back button, Recents overview, gesture navigation, Quick Settings, and notifications always remain usable without disrupting the app's internal layout or navigation state.
 - **Multitask Without State Resets or Media Pauses**: Open Recents, pull down the notification shade, check a reference note, reply to a message, or use floating/split-screen windows without triggering unwanted WebView playback/timer pauses, aggressive activity teardowns, clipboard wipes, or full state resets.
 - **No \`system_server\` Scoping Required**: Unlike legacy pinning modules that target the Android System Framework (\`android\`), ${config.moduleName} operates strictly inside the scoped target app process (or directly inside a Morphe-patched APK without root or LSPosed).
-- **Per-App Presets & Patch-Time Granularity**: Leave pinning disabled across all scoped apps with **Reactive** mode (emulates pinned state only after \`startLockTask()\` is invoked) or assign **Light**, **Balanced**, or **Aggressive** profiles per app directly inside the app picker.
+- **Per-App Presets & One-Tap Hook Pruning**: Test an app under \`Balanced\` or \`Aggressive\`, open the **Live Hook Event Log**, tap **Keep Active Only** to prune unused 0-hit hooks automatically, and copy the resulting rules directly as Morphe \`-O\` CLI flags.
 
 ## Option 1: Morphe Patching (No Root / No Xposed)
 
@@ -6264,12 +7148,12 @@ ${config.moduleName} lets you stay in control of multitasking and system navigat
    \`\`\`bash
    gradle :patches:buildAndroid :patches:generatePatchesList
    \`\`\`
-2. Import \`${folderName}-v${ver}.mpp\` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI**.
+2. Import \`${folderName}-v${ver}.mpp\` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI** (use **Copy Morphe CLI** in the ${config.moduleName} app to paste \`-O\` flags directly).
 3. Pick any target APK, open **Patching Options** on the **${config.moduleName}** universal patch to configure:
    - **\`Spoof Timing Mode\`**: \`Reactive (after startLockTask)\` (default) or \`Always Pinned (from launch)\`.
    - **\`Disable Pinning (startLockTask / stopLockTask)\`** & **\`Binder Stub\$Proxy LockTask Interception\`**.
    - **\`Spoof ActivityManager Pin State\`** & **\`Hide Multi-Window & Picture-in-Picture\`**.
-   - **\`Window Focus Spoofing (Safe)\`**, **\`WebView Visibility, JS & Pause Stealth\`**, & **\`Suppress onPause / onStop (Advanced)\`**.
+   - **\`Window Focus Spoofing (Safe)\`**, **\`WebView Visibility, JS & Pause Stealth\`**, & **\`Suppress onPause / onStop\`**.
    - **\`Simulate Pinned Window Insets\`**, **\`Strip FLAG_SECURE\`**, **\`Virtual Display & Screen Sharing Bypass\`**, **\`Unblock Clipboard Clear\`**, **\`Hide Accessibility & Overlay Checks\`**, & **\`Retain Audio Focus\`**.
    - **\`Cloak Packages & Play Store Installer\`**, **\`Sanitize Stack Traces\`**, **\`Spoof Motion Sensors (Stationary)\`**, **\`Static Package Signature Spoof\`** + **\`Original Certificate DER Hex\`**, & **\`Play Integrity / SafetyNet Soft-Fail\`**.
    - **\`Spoof Settings.System lock_to_app_enabled\`**, **\`Spoof DevicePolicyManager.isLockTaskPermitted\`**, & **\`Verbose Logcat Debug Logging\`**.
@@ -6280,7 +7164,7 @@ ${config.moduleName} lets you stay in control of multitasking and system navigat
 1. Install \`${folderName}-v${ver}.apk\` (from \`${folderName}-apks\`).
 2. Open **LSPosed Manager** -> **Modules** -> **${config.moduleName}**.
 3. Enable the module and select **only the target apps** you want to affect (keep **System Framework (\`android\`) UNCHECKED**).
-4. Open **${config.moduleName}**, tap **Select App Override** to expand inline per-app rules/presets (\`Light\` / \`Balanced\` / \`Aggressive\`), import/export JSON configs, or tap any **Live Hook Event Counter** tile to inspect triggered methods, then force-stop and relaunch your target app.
+4. Open **${config.moduleName}**, tap **Select App Override** (search or filter by \`All\`, \`Modified\`, or \`Active Hits\`) to expand inline per-app rules/presets (\`Light\` / \`Balanced\` / \`Aggressive\`), tap **Live Hook Event Counter** tiles to inspect/prune unused hooks, or export configs as JSON / Morphe CLI \`-O\` flags.
 
 - **Package ID**: \`${pkg}\`
 - **Entry Class**: \`${pkg}.PinSpoofModule\`

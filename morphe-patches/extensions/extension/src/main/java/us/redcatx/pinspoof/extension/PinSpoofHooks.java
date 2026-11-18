@@ -43,7 +43,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Runtime hook targets merged into the patched APK by PinSpoof v1.3.1 Morphe Patch.
+ * Runtime hook targets merged into the patched APK by PinSpoof v1.3.2 Morphe Patch.
  * Patch-time options are configured via Morphe Manager / CLI Patching Options.
  */
 @SuppressWarnings({"unused", "deprecation"})

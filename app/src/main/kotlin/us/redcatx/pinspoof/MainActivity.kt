@@ -1,5 +1,9 @@
 package us.redcatx.pinspoof
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
@@ -28,21 +32,27 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.Analytics
 import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.AspectRatio
+import androidx.compose.material.icons.rounded.AutoFixHigh
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -62,6 +72,7 @@ import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
@@ -130,7 +141,8 @@ import us.redcatx.pinspoof.ui.PinSpoofTheme
 data class InstalledAppItem(
     val label: String,
     val packageName: String,
-    val hasOverride: Boolean
+    val hasOverride: Boolean,
+    val hitTotal: Long
 )
 
 class MainActivity : ComponentActivity() {
@@ -227,6 +239,15 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     var showAppPicker by remember { mutableStateOf(false) }
     var showEventLogSheet by remember { mutableStateOf(false) }
     var eventLogFilter by remember { mutableStateOf("all") }
+    var morpheOptionsTarget by remember { mutableStateOf<Pair<String, GranularHookState>?>(null) }
+
+    fun copyMorpheCliOptions(label: String, state: GranularHookState) {
+        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        cm?.setPrimaryClip(ClipData.newPlainText("$label Morphe CLI Options", state.toMorpheCliFlags()))
+        scope.launch {
+            snackbarHostState.showSnackbar("Copied Morphe CLI -O options for $label")
+        }
+    }
 
     DisposableEffect(prefsManager, selectedPkg, lifecycleOwner) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
@@ -452,6 +473,38 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 Icon(Icons.Rounded.Download, null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.size(6.dp))
                                 Text("Import JSON")
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { copyMorpheCliOptions(selectedLabel, hookState) },
+                                shape = RoundedCornerShape(16.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onSurface
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Rounded.ContentCopy, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.size(6.dp))
+                                Text("Copy Morphe CLI", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            OutlinedButton(
+                                onClick = { morpheOptionsTarget = selectedLabel to hookState },
+                                shape = RoundedCornerShape(16.dp),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.onSurface
+                                ),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.size(6.dp))
+                                Text("Morphe Checklist", maxLines = 1, overflow = TextOverflow.Ellipsis)
                             }
                         }
 
@@ -907,42 +960,61 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     if (showAppPicker) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
         var query by remember { mutableStateOf("") }
+        var appFilter by remember { mutableStateOf("all") }
         var expandedPkg by remember { mutableStateOf<String?>(selectedPkg) }
         val appStatesMap = remember { mutableStateMapOf<String, GranularHookState>() }
         val overrideMap = remember { mutableStateMapOf<String, Boolean>() }
 
         val installedApps = remember {
             val pm = context.packageManager
+            val launchablePkgs = runCatching {
+                val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+                pm.queryIntentActivities(intent, 0).mapNotNullTo(HashSet()) { it.activityInfo?.packageName }
+            }.getOrDefault(emptySet())
+
             pm.getInstalledApplications(PackageManager.GET_META_DATA)
                 .asSequence()
-                .filter {
-                    it.packageName != HookConfig.MODULE_PKG &&
-                        it.packageName != "android" &&
-                        (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0
-                }
-                .map {
-                    val hasCustom = prefsManager.hasPerAppOverride(it.packageName)
-                    overrideMap[it.packageName] = hasCustom
+                .mapNotNull { info ->
+                    val pName = info.packageName
+                    if (pName == HookConfig.MODULE_PKG || pName == "android") return@mapNotNull null
+                    val hasCustom = prefsManager.hasPerAppOverride(pName)
+                    val hitTotal = prefsManager.getPackageHitTotal(pName)
+                    val isUserOrLaunchable = (info.flags and ApplicationInfo.FLAG_SYSTEM) == 0 ||
+                        pName in launchablePkgs ||
+                        hasCustom ||
+                        hitTotal > 0L
+                    if (!isUserOrLaunchable) return@mapNotNull null
+                    overrideMap[pName] = hasCustom
                     InstalledAppItem(
-                        label = pm.getApplicationLabel(it).toString(),
-                        packageName = it.packageName,
-                        hasOverride = hasCustom
+                        label = pm.getApplicationLabel(info).toString(),
+                        packageName = pName,
+                        hasOverride = hasCustom,
+                        hitTotal = hitTotal
                     )
                 }
-                .sortedWith(compareByDescending<InstalledAppItem> { it.hasOverride }.thenBy { it.label })
+                .sortedWith(compareBy<InstalledAppItem> { it.label.lowercase() }.thenBy { it.packageName })
                 .toList()
         }
 
-        val filtered = remember(query, installedApps, overrideMap.toMap()) {
-            val baseList = if (query.isBlank()) installedApps
-            else installedApps.filter {
-                it.label.contains(query, ignoreCase = true) ||
-                    it.packageName.contains(query, ignoreCase = true)
+        val modifiedCount = remember(overrideMap.toMap()) {
+            installedApps.count { overrideMap[it.packageName] == true }
+        }
+        val activeHitsCount = remember(installedApps) {
+            installedApps.count { it.hitTotal > 0L }
+        }
+
+        val filtered = remember(query, appFilter, installedApps, overrideMap.toMap()) {
+            installedApps.filter { app ->
+                val matchesTab = when (appFilter) {
+                    "modified" -> overrideMap[app.packageName] == true
+                    "active" -> app.hitTotal > 0L
+                    else -> true
+                }
+                if (!matchesTab) return@filter false
+                if (query.isBlank()) true
+                else app.label.contains(query, ignoreCase = true) ||
+                    app.packageName.contains(query, ignoreCase = true)
             }
-            baseList.sortedWith(
-                compareByDescending<InstalledAppItem> { overrideMap[it.packageName] == true }
-                    .thenBy { it.label }
-            )
         }
 
         ModalBottomSheet(
@@ -980,9 +1052,29 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         shape = RoundedCornerShape(18.dp),
                         modifier = Modifier.fillMaxWidth()
                     )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        FilterChip(
+                            selected = appFilter == "all",
+                            onClick = { appFilter = "all" },
+                            label = { Text("All (${installedApps.size})") }
+                        )
+                        FilterChip(
+                            selected = appFilter == "modified",
+                            onClick = { appFilter = "modified" },
+                            label = { Text("Modified ($modifiedCount)") }
+                        )
+                        FilterChip(
+                            selected = appFilter == "active",
+                            onClick = { appFilter = "active" },
+                            label = { Text("Active Hits ($activeHitsCount)") }
+                        )
+                    }
                 }
 
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(10.dp))
 
                 LazyColumn(
                     modifier = Modifier
@@ -1027,7 +1119,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
                                     verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(14.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                                 ) {
                                     AppIconView(
                                         packageName = app.packageName,
@@ -1054,6 +1146,21 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis
                                         )
+                                    }
+
+                                    if (app.hitTotal > 0L) {
+                                        Surface(
+                                            shape = RoundedCornerShape(10.dp),
+                                            color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.8f)
+                                        ) {
+                                            Text(
+                                                text = "${app.hitTotal} hits",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontFamily = FontFamily.Monospace,
+                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                            )
+                                        }
                                     }
 
                                     if (isCustom) {
@@ -1184,6 +1291,30 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                             }
                                         )
 
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            OutlinedButton(
+                                                onClick = { copyMorpheCliOptions(app.label, appState) },
+                                                shape = RoundedCornerShape(14.dp),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(Icons.Rounded.ContentCopy, null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.size(6.dp))
+                                                Text("Copy Morphe CLI", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            }
+                                            OutlinedButton(
+                                                onClick = { morpheOptionsTarget = app.label to appState },
+                                                shape = RoundedCornerShape(14.dp),
+                                                modifier = Modifier.weight(1f)
+                                            ) {
+                                                Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.size(6.dp))
+                                                Text("Checklist", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                            }
+                                        }
+
                                         FilledTonalButton(
                                             onClick = {
                                                 if (!isCustom) {
@@ -1281,6 +1412,39 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                     }
                 }
 
+                FilledTonalButton(
+                    onClick = {
+                        if (eventLog.isEmpty()) {
+                            scope.launch {
+                                snackbarHostState.showSnackbar("No recorded hits yet — launch the target app first")
+                            }
+                            return@FilledTonalButton
+                        }
+                        val (prunedState, disabledCount) = hookState.pruneUnusedHooks(eventLog)
+                        updateState { prunedState }
+                        scope.launch {
+                            snackbarHostState.showSnackbar(
+                                if (disabledCount > 0) {
+                                    "Kept active hooks for $selectedLabel · disabled $disabledCount unused"
+                                } else {
+                                    "All enabled hooks already have active hits"
+                                }
+                            )
+                        }
+                    },
+                    enabled = eventLog.isNotEmpty(),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoFixHigh,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.size(8.dp))
+                    Text("Keep Active Only (Prune 0-Hit Hooks)")
+                }
+
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1313,6 +1477,114 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
             }
         }
+    }
+
+    // Morphe CLI & Manager Checklist Dialog
+    morpheOptionsTarget?.let { (targetTitle, targetState) ->
+        val cliFlags = remember(targetState) { targetState.toMorpheCliFlags() }
+        val checklist = remember(targetState) { targetState.toMorpheChecklist() }
+
+        AlertDialog(
+            onDismissRequest = { morpheOptionsTarget = null },
+            title = {
+                Column {
+                    Text("Morphe Patch Options", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = targetTitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            },
+            text = {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 420.dp)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "Morphe Desktop CLI (-O Flags)",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = cliFlags,
+                            style = MaterialTheme.typography.bodySmall,
+                            fontFamily = FontFamily.Monospace,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+
+                    Text(
+                        text = "Morphe Manager Checklist",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        checklist.forEach { (optName, optValue) ->
+                            val isActiveVal = optValue == "ON" || optValue.startsWith("Always")
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = optName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .padding(end = 8.dp)
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (isActiveVal) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceContainerHighest
+                                    }
+                                ) {
+                                    Text(
+                                        text = optValue,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = if (isActiveVal) {
+                                            MaterialTheme.colorScheme.onPrimaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        copyMorpheCliOptions(targetTitle, targetState)
+                        morpheOptionsTarget = null
+                    }
+                ) {
+                    Text("Copy -O Flags")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { morpheOptionsTarget = null }) {
+                    Text("Close")
+                }
+            }
+        )
     }
 }
 
