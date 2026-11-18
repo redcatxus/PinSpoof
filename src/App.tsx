@@ -31,6 +31,7 @@ export default function App() {
         <PinSimulator
           spoofTiming={config.spoofTiming}
           hideFocusLoss={config.hideFocusLoss}
+          hideWebViewVisibility={config.hideWebViewVisibility}
           hideLifecycleLoss={config.hideLifecycleLoss}
           onChangeSpoofTiming={(mode) => setConfig((prev) => ({ ...prev, spoofTiming: mode }))}
         />
@@ -45,6 +46,7 @@ export default function App() {
         <InstallGuide
           packageName={config.packageName}
           moduleName={config.moduleName}
+          versionName={config.versionName}
           targetSdk={config.targetSdk}
         />
       </main>
@@ -52,7 +54,8 @@ export default function App() {
       <footer className="border-t border-slate-800/80 bg-[#0B0F17]">
         <div className="mx-auto max-w-[1280px] px-6 py-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 text-xs text-slate-500">
           <span>
-            {config.moduleName} · {config.packageName} · API {config.minSdk}–{config.targetSdk}
+            {config.moduleName} v{config.versionName} · {config.packageName} · API {config.minSdk}–
+            {config.targetSdk}
           </span>
           <button
             type="button"

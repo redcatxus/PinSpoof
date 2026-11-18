@@ -12,6 +12,7 @@ interface TraceEntry {
 interface PinSimulatorProps {
   spoofTiming: SpoofTimingMode;
   hideFocusLoss: boolean;
+  hideWebViewVisibility: boolean;
   hideLifecycleLoss: boolean;
   onChangeSpoofTiming: (mode: SpoofTimingMode) => void;
 }
@@ -19,6 +20,7 @@ interface PinSimulatorProps {
 export function PinSimulator({
   spoofTiming,
   hideFocusLoss,
+  hideWebViewVisibility,
   hideLifecycleLoss,
   onChangeSpoofTiming,
 }: PinSimulatorProps) {
@@ -90,21 +92,23 @@ export function PinSimulator({
     setLastCallLabel(
       nextBg ? 'User opened Recents / switched app' : 'User returned to target app'
     );
+    const activeLayers = [
+      hideFocusLoss ? 'window focus + onUserLeaveHint()' : null,
+      hideWebViewVisibility ? 'WebView visibility + DOM JS' : null,
+      hideLifecycleLoss ? 'onPause/onStop/LifecycleRegistry' : null,
+    ].filter(Boolean);
+
     appendTrace({
       call: nextBg
-        ? 'Recents / Focus Loss (onUserLeaveHint, onPause, dispatchWindowFocusChanged(false))'
+        ? 'Recents / Focus Loss (onUserLeaveHint, dispatchWindowFocusChanged(false))'
         : 'DecorView.onWindowFocusChanged(true)',
       stockResult: nextBg
         ? 'hasWindowFocus()=false, onPause/onStop fired, IMPORTANCE_CACHED'
         : 'hasWindowFocus()=true, IMPORTANCE_FOREGROUND',
       spoofResult: nextBg
-        ? hideFocusLoss && hideLifecycleLoss
-          ? 'Dropped false focus, WebView visibility & onPause/onStop/onUserLeaveHint'
-          : hideFocusLoss
-            ? 'Dropped false focus; onPause/onStop passed through (hideLifecycleLoss off)'
-            : hideLifecycleLoss
-              ? 'Suppressed onPause/onStop; focus loss passed through (hideFocusLoss off)'
-              : 'Focus & lifecycle events passed through'
+        ? activeLayers.length > 0
+          ? `Masked: ${activeLayers.join(' + ')}`
+          : 'Focus & lifecycle events passed through'
         : 'hasWindowFocus()=true, IMPORTANCE_FOREGROUND',
     });
   };
@@ -162,7 +166,7 @@ export function PinSimulator({
                   : 'text-slate-400 hover:text-slate-200'
               }`}
             >
-              Reactive (After startLockTask)
+              Reactive (Recommended)
             </button>
             <button
               type="button"

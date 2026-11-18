@@ -1,5 +1,6 @@
 package us.redcatx.pinspoof
 
+import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -8,8 +9,10 @@ import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -28,16 +31,25 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AccessibilityNew
+import androidx.compose.material.icons.rounded.Analytics
 import androidx.compose.material.icons.rounded.Android
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.AspectRatio
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.LayersClear
 import androidx.compose.material.icons.rounded.PauseCircleOutline
 import androidx.compose.material.icons.rounded.PhonelinkLock
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.Upload
 import androidx.compose.material.icons.rounded.VisibilityOff
+import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -45,14 +57,18 @@ import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -61,10 +77,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -80,8 +98,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import us.redcatx.pinspoof.prefs.GranularHookState
+import us.redcatx.pinspoof.prefs.HookPreset
+import us.redcatx.pinspoof.prefs.HookStats
 import us.redcatx.pinspoof.prefs.PrefsManager
 import us.redcatx.pinspoof.ui.PinSpoofTheme
 
@@ -165,6 +186,8 @@ private fun AppIconView(
 @Composable
 private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val snackbarHostState = remember { SnackbarHostState() }
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
 
     var selectedPkg by remember { mutableStateOf<String?>(null) }
@@ -173,7 +196,16 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     var hasOverride by remember(selectedPkg) {
         mutableStateOf(selectedPkg?.let { prefsManager.hasPerAppOverride(it) } ?: false)
     }
+    var stats by remember(selectedPkg) { mutableStateOf(prefsManager.loadStats(selectedPkg)) }
     var showAppPicker by remember { mutableStateOf(false) }
+
+    DisposableEffect(prefsManager, selectedPkg) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            stats = prefsManager.loadStats(selectedPkg)
+        }
+        prefsManager.registerStatsListener(listener)
+        onDispose { prefsManager.unregisterStatsListener(listener) }
+    }
 
     fun updateState(transform: (GranularHookState) -> GranularHookState) {
         val next = transform(hookState)
@@ -184,16 +216,48 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         }
     }
 
+    val exportLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.CreateDocument("application/json")
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            context.contentResolver.openOutputStream(uri)?.use { stream ->
+                stream.write(hookState.toJson(selectedPkg).toByteArray(Charsets.UTF_8))
+            }
+        }.onSuccess {
+            scope.launch { snackbarHostState.showSnackbar("Exported profile JSON") }
+        }.onFailure {
+            scope.launch { snackbarHostState.showSnackbar("Export failed: ${it.message}") }
+        }
+    }
+
+    val importLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            val raw = context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                ?: error("Empty file")
+            GranularHookState.fromJson(raw, hookState)
+        }.onSuccess { imported ->
+            updateState { imported }
+            scope.launch { snackbarHostState.showSnackbar("Imported profile JSON") }
+        }.onFailure {
+            scope.launch { snackbarHostState.showSnackbar("Invalid JSON profile") }
+        }
+    }
+
     Scaffold(
         modifier = Modifier
             .fillMaxSize()
             .nestedScroll(scrollBehavior.nestedScrollConnection),
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             LargeTopAppBar(
                 title = {
                     Column {
                         Text(
-                            text = HookConfig.MODULE_TAG,
+                            text = "${HookConfig.MODULE_TAG} v1.2.0",
                             style = MaterialTheme.typography.headlineMediumEmphasized,
                             fontWeight = FontWeight.Bold
                         )
@@ -222,7 +286,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
             ),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // Expressive Scope Selector Card
+            // Expressive Scope Selector Card + JSON Export/Import
             item {
                 ElevatedCard(
                     shape = RoundedCornerShape(28.dp),
@@ -283,7 +347,8 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         }
 
                         Row(
-                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             FilledTonalButton(
@@ -309,6 +374,33 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 ) {
                                     Text("Use Global")
                                 }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    val base = selectedPkg ?: "global"
+                                    exportLauncher.launch("pinspoof-$base.json")
+                                },
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Rounded.Upload, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.size(6.dp))
+                                Text("Export JSON")
+                            }
+                            OutlinedButton(
+                                onClick = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Rounded.Download, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.size(6.dp))
+                                Text("Import JSON")
                             }
                         }
 
@@ -339,7 +431,69 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
             }
 
-            // Master LockTask Spoof & Timing Card
+            // Live Hook Event Counter Card
+            item {
+                ElevatedCard(shape = RoundedCornerShape(28.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.Analytics,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                                Column {
+                                    Text(
+                                        text = "Live Hook Event Counter",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        text = if (selectedPkg == null) "All scoped apps combined" else selectedLabel,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            Row {
+                                IconButton(onClick = { stats = prefsManager.loadStats(selectedPkg) }) {
+                                    Icon(Icons.Rounded.Refresh, contentDescription = "Refresh counts")
+                                }
+                                TextButton(onClick = {
+                                    prefsManager.resetStats(selectedPkg)
+                                    stats = HookStats()
+                                }) {
+                                    Text("Reset")
+                                }
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            StatTile("Pinning", stats.pinBlocked, Modifier.weight(1f))
+                            StatTile("Focus", stats.focusHidden, Modifier.weight(1f))
+                            StatTile("WebView", stats.webviewSpoofed, Modifier.weight(1f))
+                            StatTile("Lifecycle", stats.lifecycleHidden, Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+
+            // One-Tap Preset Profiles + Master LockTask Spoof & Timing Card
             item {
                 ElevatedCard(shape = RoundedCornerShape(28.dp)) {
                     Column(
@@ -348,6 +502,36 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             .padding(20.dp),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                text = "One-Tap Preset Profiles",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                                HookPreset.entries.forEachIndexed { index, preset ->
+                                    val isSelected = hookState == hookState.withPreset(preset)
+                                    SegmentedButton(
+                                        selected = isSelected,
+                                        onClick = {
+                                            updateState { it.withPreset(preset) }
+                                            scope.launch {
+                                                snackbarHostState.showSnackbar("Applied ${preset.label} preset")
+                                            }
+                                        },
+                                        shape = SegmentedButtonDefaults.itemShape(
+                                            index = index,
+                                            count = HookPreset.entries.size
+                                        )
+                                    ) {
+                                        Text(preset.label)
+                                    }
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
                         ExpressiveToggleRow(
                             icon = Icons.Rounded.PhonelinkLock,
                             title = "Disable Pinning & Spoof Pinned",
@@ -359,7 +543,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         AnimatedVisibility(visible = hookState.masterEnabled) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(
-                                    text = "Spoof Timing Mode",
+                                    text = "Spoof Timing Mode (Reactive recommended)",
                                     style = MaterialTheme.typography.labelLarge,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -385,7 +569,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
             }
 
-            // Focus & Recents Stealth Card
+            // Focus, WebView & Lifecycle Stealth Card
             item {
                 ElevatedCard(shape = RoundedCornerShape(28.dp)) {
                     Column(
@@ -396,16 +580,24 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                     ) {
                         ExpressiveToggleRow(
                             icon = Icons.Rounded.VisibilityOff,
-                            title = "Hide Window Focus Loss",
-                            subtitle = "Drop View.dispatchWindowFocusChanged(false), ViewTreeObserver, WebView visibility, topResumed(false), and force IMPORTANCE_FOREGROUND",
+                            title = "Window Focus Spoofing (Safe)",
+                            subtitle = "Drop onWindowFocusChanged(false), topResumed(false), onUserLeaveHint(), hasWindowFocus() -> true, IMPORTANCE_FOREGROUND",
                             checked = hookState.hideFocusLoss,
                             onCheckedChange = { v -> updateState { it.copy(hideFocusLoss = v) } }
                         )
                         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                         ExpressiveToggleRow(
+                            icon = Icons.Rounded.Language,
+                            title = "WebView Visibility, JS & Pause Stealth",
+                            subtitle = "Force View.VISIBLE, block WebView.onPause()/pauseTimers(), and spoof JS document.hidden / visibilityState / blur",
+                            checked = hookState.hideWebViewVisibility,
+                            onCheckedChange = { v -> updateState { it.copy(hideWebViewVisibility = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
                             icon = Icons.Rounded.PauseCircleOutline,
-                            title = "Suppress onPause / onStop / Recents",
-                            subtitle = "Block app onUserLeaveHint(), onPause(), onStop(), ActivityLifecycleCallbacks, and LifecycleRegistry ON_PAUSE/ON_STOP when opening Recents",
+                            title = "Suppress onPause / onStop (Advanced)",
+                            subtitle = "OFF by default: blocking Activity/LifecycleRegistry transitions can stall SurfaceView/TextureView graphics on resume",
                             checked = hookState.hideLifecycleLoss,
                             onCheckedChange = { v -> updateState { it.copy(hideLifecycleLoss = v) } }
                         )
@@ -421,6 +613,56 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
             }
 
+            // Modern UI, Window Insets & Environment Stealth Card
+            item {
+                ElevatedCard(shape = RoundedCornerShape(28.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(14.dp)
+                    ) {
+                        Text(
+                            text = "Window, Insets & Environment Stealth",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.AspectRatio,
+                            title = "Simulate Pinned Window Insets",
+                            subtitle = "Report zeroed system bar WindowInsets while keeping your actual navigation bar & gestures usable",
+                            checked = hookState.spoofPinnedInsets,
+                            onCheckedChange = { v -> updateState { it.copy(spoofPinnedInsets = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.Shield,
+                            title = "Strip FLAG_SECURE",
+                            subtitle = "Clear FLAG_SECURE on Windows and SurfaceViews for screenshots and screen troubleshooting",
+                            checked = hookState.stripFlagSecure,
+                            onCheckedChange = { v -> updateState { it.copy(stripFlagSecure = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.AccessibilityNew,
+                            title = "Hide Accessibility & Overlay Checks",
+                            subtitle = "Return empty AccessibilityManager service list and Settings.canDrawOverlays() = false",
+                            checked = hookState.hideAccessibilityOverlays,
+                            onCheckedChange = { v -> updateState { it.copy(hideAccessibilityOverlays = v) } }
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                        ExpressiveToggleRow(
+                            icon = Icons.Rounded.VolumeUp,
+                            title = "Retain Audio Focus",
+                            subtitle = "Suppress negative OnAudioFocusChangeListener events when notifications play",
+                            checked = hookState.retainAudioFocus,
+                            onCheckedChange = { v -> updateState { it.copy(retainAudioFocus = v) } }
+                        )
+                    }
+                }
+            }
+
             // Granular Hook Surface Matrix
             item {
                 ElevatedCard(shape = RoundedCornerShape(28.dp)) {
@@ -431,7 +673,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         verticalArrangement = Arrangement.spacedBy(14.dp)
                     ) {
                         Text(
-                            text = "Granular Hook Surfaces",
+                            text = "LockTask Hook Surfaces",
                             style = MaterialTheme.typography.titleMedium,
                             fontWeight = FontWeight.SemiBold
                         )
@@ -449,16 +691,16 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             onCheckedChange = { v -> updateState { it.copy(hookActivityManagerState = v) } }
                         )
                         GranularSwitchItem(
-                            title = "Binder Stub\$Proxy Interception",
-                            subtitle = "Hook IActivityTaskManager & IActivityManager IPC proxies",
-                            checked = hookState.hookBinderProxies,
-                            onCheckedChange = { v -> updateState { it.copy(hookBinderProxies = v) } }
-                        )
-                        GranularSwitchItem(
                             title = "ActivityClient Wrapper (Android 12–16)",
-                            subtitle = "Hook API 31–36 ActivityClient lock-task token calls",
+                            subtitle = "Dynamic LockTask token scan safe across OEM ROMs",
                             checked = hookState.hookActivityClient,
                             onCheckedChange = { v -> updateState { it.copy(hookActivityClient = v) } }
+                        )
+                        GranularSwitchItem(
+                            title = "Binder Stub\$Proxy Interception (Advanced)",
+                            subtitle = "OFF by default: dynamic Stub\$Proxy scan for apps calling Binder proxies directly",
+                            checked = hookState.hookBinderProxies,
+                            onCheckedChange = { v -> updateState { it.copy(hookBinderProxies = v) } }
                         )
                         GranularSwitchItem(
                             title = "Settings.System lock_to_app_enabled",
@@ -468,13 +710,13 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         )
                         GranularSwitchItem(
                             title = "DevicePolicyManager.isLockTaskPermitted",
-                            subtitle = "Report LockTask permission as granted for scoped app",
+                            subtitle = "Report LockTask permission as granted for scoped package",
                             checked = hookState.hookDpmPermitted,
                             onCheckedChange = { v -> updateState { it.copy(hookDpmPermitted = v) } }
                         )
                         GranularSwitchItem(
                             title = "Verbose LSPosed Logging",
-                            subtitle = "Emit XposedBridge.log traces for every intercepted call",
+                            subtitle = "Emit XposedBridge.log traces for intercepted calls",
                             checked = hookState.debugLogging,
                             onCheckedChange = { v -> updateState { it.copy(debugLogging = v) } }
                         )
@@ -626,6 +868,40 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 }
                 Spacer(Modifier.height(20.dp))
             }
+        }
+    }
+}
+
+@Composable
+private fun StatTile(
+    label: String,
+    count: Long,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 10.dp, vertical = 10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp)
+        ) {
+            Text(
+                text = count.toString(),
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                fontFamily = FontFamily.Monospace,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         }
     }
 }

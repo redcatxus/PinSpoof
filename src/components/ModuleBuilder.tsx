@@ -1,9 +1,11 @@
 import { useMemo, useState } from 'react';
 import { Check, Copy, Download, RotateCcw } from 'lucide-react';
 import {
+  applyPresetToConfig,
   DEFAULT_MODULE_CONFIG,
   type GeneratedFile,
   type ModuleConfig,
+  type PresetProfileId,
 } from '../types/moduleConfig';
 import { generateProjectFiles } from '../utils/projectGenerator';
 
@@ -41,17 +43,28 @@ export function ModuleBuilder({
     }
   };
 
+  const presets: Array<{ id: PresetProfileId; label: string }> = [
+    { id: 'light', label: 'Light' },
+    { id: 'balanced', label: 'Balanced' },
+    { id: 'aggressive', label: 'Aggressive' },
+  ];
+
   const toggleItems: Array<{
     key: keyof Pick<
       ModuleConfig,
       | 'includeMaterialYouUi'
       | 'hideFocusLoss'
+      | 'hideWebViewVisibility'
       | 'hideLifecycleLoss'
       | 'hideMultiWindowAndPip'
+      | 'spoofPinnedInsets'
+      | 'stripFlagSecure'
+      | 'hideAccessibilityAndOverlays'
+      | 'retainAudioFocus'
       | 'hookActivityLockTask'
       | 'hookActivityManagerState'
-      | 'hookBinderProxies'
       | 'hookActivityClient'
+      | 'hookBinderProxies'
       | 'hookSettingsLockToApp'
       | 'hookDevicePolicyPermitted'
       | 'debugLogging'
@@ -62,22 +75,47 @@ export function ModuleBuilder({
     {
       key: 'includeMaterialYouUi',
       label: 'In-App Material 3 Expressive + Material You UI',
-      detail: 'Generate Jetpack Compose settings screen with per-app granular xposedsharedprefs.',
+      detail: 'Compose UI with Light/Balanced/Aggressive presets, JSON import/export & live counters.',
     },
     {
       key: 'hideFocusLoss',
-      label: 'Hide Window Focus Loss & WebView Visibility',
-      detail: 'Suppress View.dispatchWindowFocusChanged(false), ViewTreeObserver, WebView visibility, and IMPORTANCE_FOREGROUND.',
+      label: 'Window Focus Spoofing (Safe Default)',
+      detail: 'Drop onWindowFocusChanged(false), topResumed(false), onUserLeaveHint(), and IMPORTANCE_FOREGROUND.',
+    },
+    {
+      key: 'hideWebViewVisibility',
+      label: 'WebView Visibility, JS & Pause Stealth',
+      detail: 'Split out for stability: force View.VISIBLE, block WebView.onPause(), inject Page Visibility JS.',
     },
     {
       key: 'hideLifecycleLoss',
-      label: 'Suppress onPause / onStop / Recents Leave',
-      detail: 'Block app onUserLeaveHint(), onPause(), onStop(), ActivityLifecycleCallbacks, and LifecycleRegistry ON_PAUSE/ON_STOP.',
+      label: 'Suppress onPause / onStop (Advanced)',
+      detail: 'OFF by default: blocking Activity/LifecycleRegistry transitions can freeze SurfaceView graphics.',
     },
     {
       key: 'hideMultiWindowAndPip',
       label: 'Hide Multi-Window & PiP',
       detail: 'Return false for isInMultiWindowMode() and isInPictureInPictureMode().',
+    },
+    {
+      key: 'spoofPinnedInsets',
+      label: 'Simulate Pinned Window Insets',
+      detail: 'Report zeroed system bar WindowInsets while keeping your navigation bar & gestures working.',
+    },
+    {
+      key: 'stripFlagSecure',
+      label: 'Strip FLAG_SECURE',
+      detail: 'Clear FLAG_SECURE on Windows and SurfaceViews for screenshots and troubleshooting.',
+    },
+    {
+      key: 'hideAccessibilityAndOverlays',
+      label: 'Hide Accessibility & Overlay Checks',
+      detail: 'Return empty AccessibilityManager service list and Settings.canDrawOverlays() = false.',
+    },
+    {
+      key: 'retainAudioFocus',
+      label: 'Retain Audio Focus',
+      detail: 'Suppress negative AudioManager.OnAudioFocusChangeListener notifications.',
     },
     {
       key: 'hookActivityLockTask',
@@ -90,14 +128,14 @@ export function ModuleBuilder({
       detail: 'Return LOCK_TASK_MODE_PINNED (2) and isInLockTaskMode() = true.',
     },
     {
-      key: 'hookBinderProxies',
-      label: 'IActivityTaskManager & IActivityManager Proxies',
-      detail: 'Intercept direct/hidden Stub$Proxy Binder calls (API 21–36).',
+      key: 'hookActivityClient',
+      label: 'ActivityClient Wrapper (API 31–36)',
+      detail: 'Dynamic method scan safe across One UI / HyperOS / ColorOS ROMs.',
     },
     {
-      key: 'hookActivityClient',
-      label: 'ActivityClient Token Hooks (API 31–36)',
-      detail: 'Cover Android 12–16 ActivityClient lock-task token wrapper.',
+      key: 'hookBinderProxies',
+      label: 'Binder Stub$Proxy Interception (Advanced)',
+      detail: 'OFF by default: dynamically scans IActivityTaskManager & IActivityManager IPC proxies.',
     },
     {
       key: 'hookSettingsLockToApp',
@@ -112,7 +150,7 @@ export function ModuleBuilder({
     {
       key: 'debugLogging',
       label: 'Verbose Debug Logs (Morphe / LSPosed)',
-      detail: 'Emit Log.d / XposedBridge.log entries on each intercepted pinning or focus call.',
+      detail: 'Emit Log.d / XposedBridge.log entries on intercepted pinning or focus calls.',
     },
   ];
 
@@ -125,8 +163,8 @@ export function ModuleBuilder({
               02. Morphe Patch &amp; Xposed Module Builder
             </h2>
             <p className="mt-1.5 text-sm text-slate-400 max-w-2xl">
-              Configure defaults for both Morphe Patching Options and the app-scoped Xposed APK.
-              Every change updates both the Morphe patch bundle and Gradle APK project live.
+              Configure v{config.versionName} defaults for both Morphe Patching Options and the
+              app-scoped Xposed APK. Every toggle updates the Morphe bundle and Gradle project live.
             </p>
           </div>
 
@@ -220,8 +258,20 @@ export function ModuleBuilder({
             </div>
 
             <div className="pt-4 border-t border-slate-800">
-              <div className="text-xs font-semibold text-slate-300 mb-2.5">
-                Features &amp; Granular Hook Defaults
+              <div className="flex items-center justify-between gap-2 mb-2.5">
+                <span className="text-xs font-semibold text-slate-300">One-Tap Presets</span>
+                <div className="flex items-center gap-1">
+                  {presets.map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => onChangeConfig(applyPresetToConfig(config, p.id))}
+                      className="px-2 py-1 rounded border border-slate-700 bg-slate-900 text-[11px] font-medium text-slate-300 hover:text-emerald-300 hover:border-emerald-600/50 transition-colors cursor-pointer whitespace-nowrap"
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                </div>
               </div>
               <div className="space-y-3">
                 {toggleItems.map((item) => (

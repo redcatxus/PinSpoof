@@ -23,6 +23,14 @@
             android:value="true" />
         <!-- xposedscope intentionally omitted so LSPosed lets you pick any target app freely without system_server -->
 
+        <receiver
+            android:name=".PinSpoofStatsReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="us.redcatx.pinspoof.ACTION_HOOK_STATS" />
+            </intent-filter>
+        </receiver>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

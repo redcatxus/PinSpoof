@@ -1,30 +1,39 @@
 interface InstallGuideProps {
   packageName: string;
   moduleName: string;
+  versionName: string;
   targetSdk: number;
 }
 
-export function InstallGuide({ packageName, moduleName, targetSdk }: InstallGuideProps) {
+export function InstallGuide({
+  packageName,
+  moduleName,
+  versionName,
+  targetSdk,
+}: InstallGuideProps) {
+  const apkName = `${moduleName}-v${versionName}.apk`;
+  const mppName = `${moduleName}-v${versionName}.mpp`;
+
   const steps = [
     {
       index: '01.',
-      title: 'Build via GitHub Actions CI',
-      body: `Push to GitHub and .github/workflows/build-apk.yml compiles both ${moduleName}-morphe-patches (patches-*.mpp + patches-list.json) and ${moduleName}-apks (SDK ${targetSdk}).`,
+      title: 'Build v1.2.0 Artifacts in CI',
+      body: `Push to GitHub and .github/workflows/build-apk.yml compiles both ${mppName} + patches-list.json and ${apkName} (SDK ${targetSdk}).`,
     },
     {
       index: '02.',
-      title: 'Patch Any APK in Morphe Manager',
-      body: `Open Morphe Manager -> Patches -> Select from storage (.mpp), pick any target APK, and open Patching Options to configure every feature (pin spoof, focus stealth, Recents suppression).`,
+      title: 'Patch Any APK via Morphe',
+      body: `Import ${mppName} in Morphe Manager, enable ${moduleName}, and configure Patching Options (Reactive default, split WebView JS stealth, WindowInsets, FLAG_SECURE, and audio focus).`,
     },
     {
       index: '03.',
       title: 'Or Deploy App-Scoped via LSPosed',
-      body: `Prefer runtime hooking? Install the APK, enable ${moduleName} in LSPosed for target apps only (leave System Framework unchecked), and use the Material You app UI.`,
+      body: `Install ${apkName}, enable ${moduleName} in LSPosed for target apps only (never System Framework), and pick Light / Balanced / Aggressive presets in the Material You UI.`,
     },
     {
       index: '04.',
-      title: 'Install & Verify Recents Stealth',
-      body: `Install the Morphe-patched APK (or force-stop the LSPosed-scoped app). Screen pinning is disabled while getLockTaskModeState() stays 2 and Recents switches stay hidden.`,
+      title: 'Verify Live Event Counters',
+      body: `Confirm pinning blocks and focus masks inside the PinSpoof Live Hook Event Counter card or export/import per-app JSON profiles across devices.`,
     },
   ];
 
@@ -58,26 +67,20 @@ export function InstallGuide({ packageName, moduleName, targetSdk }: InstallGuid
 
         <div className="mt-6 rounded-lg border border-slate-800 bg-[#111827] p-5">
           <h3 className="font-display text-sm font-semibold text-slate-200">
-            Morphe Bytecode Patching Options &amp; Recents Stealth
+            v1.2.0 Stability &amp; Split Hook Architecture
           </h3>
           <p className="mt-2 text-xs text-slate-400 leading-relaxed max-w-4xl">
-            During Morphe patching, all in-app toggles map 1:1 to{' '}
-            <code className="font-mono text-slate-300">PinSpoofPatch</code> options (
-            <code className="font-mono text-slate-300">spoofTiming</code>,{' '}
-            <code className="font-mono text-slate-300">hookActivityLockTask</code>,{' '}
-            <code className="font-mono text-slate-300">hookActivityManagerState</code>,{' '}
-            <code className="font-mono text-slate-300">hideFocusLoss</code>,{' '}
-            <code className="font-mono text-slate-300">hideLifecycleLoss</code>,{' '}
-            <code className="font-mono text-slate-300">hideMultiWindowAndPip</code>,{' '}
-            <code className="font-mono text-slate-300">hookSettingsLockToApp</code>,{' '}
-            <code className="font-mono text-slate-300">hookDevicePolicyPermitted</code>,{' '}
-            <code className="font-mono text-slate-300">debugLogging</code>). Bytecode hooks
-            rewrite <code className="font-mono text-slate-300">Activity</code>,{' '}
-            <code className="font-mono text-slate-300">WebView</code>,{' '}
-            <code className="font-mono text-slate-300">Fragment</code>,{' '}
-            <code className="font-mono text-slate-300">ActivityLifecycleCallbacks</code>, and{' '}
-            <code className="font-mono text-slate-300">LifecycleRegistry</code> directly inside
-            the patched APK&apos;s DEX files.
+            By default, {moduleName} v{versionName} uses the <strong className="text-slate-200">Balanced</strong>{' '}
+            profile (<code className="font-mono text-slate-300">spoofTiming=reactive</code>,{' '}
+            <code className="font-mono text-slate-300">hideFocusLoss=true</code>,{' '}
+            <code className="font-mono text-slate-300">hideWebViewVisibility=false</code>,{' '}
+            <code className="font-mono text-slate-300">hideLifecycleLoss=false</code>, and{' '}
+            <code className="font-mono text-slate-300">hookBinderProxies=false</code>) so apps
+            never skip startup checks, crash WebView GPU processes, or stall{' '}
+            <code className="font-mono text-slate-300">SurfaceView</code> graphics on resume. Enable
+            WebView JS stealth, pinned <code className="font-mono text-slate-300">WindowInsets</code>,{' '}
+            <code className="font-mono text-slate-300">FLAG_SECURE</code> stripping, or lifecycle
+            suppression per-app or via Morphe Patching Options when needed.
           </p>
         </div>
       </div>
