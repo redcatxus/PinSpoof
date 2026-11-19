@@ -2350,70 +2350,56 @@ data class GranularHookState(
         return next to disabledCount
     }
 
-    fun toMorpheOptionsPairs(): List<Pair<String, String>> {
-        val timing = if (alwaysSpoofPinned) "always" else "reactive"
-        val items = mutableListOf(
-            "spoofTiming" to timing,
-            "hookActivityLockTask" to hookActivityLockTask.toString(),
-            "hookActivityManagerState" to hookActivityManagerState.toString(),
-            "hookBinderProxies" to hookBinderProxies.toString(),
-            "hideFocusLoss" to hideFocusLoss.toString(),
-            "hideWebViewVisibility" to hideWebViewVisibility.toString(),
-            "hideLifecycleLoss" to hideLifecycleLoss.toString(),
-            "hideMultiWindowAndPip" to hideMultiWindowPip.toString(),
-            "spoofPinnedInsets" to spoofPinnedInsets.toString(),
-            "stripFlagSecure" to stripFlagSecure.toString(),
-            "bypassVirtualDisplays" to bypassVirtualDisplays.toString(),
-            "unblockClipboard" to unblockClipboard.toString(),
-            "hideAccessibilityAndOverlays" to hideAccessibilityOverlays.toString(),
-            "retainAudioFocus" to retainAudioFocus.toString(),
-            "cloakPackagesAndInstaller" to cloakPackagesInstaller.toString(),
-            "sanitizeStackTraces" to sanitizeStackTraces.toString(),
-            "spoofMotionSensors" to spoofMotionSensors.toString(),
-            "spoofPackageSignature" to spoofPackageSignature.toString()
-        )
-        val cleanHex = spoofSignatureHex.replace(":", "").replace(" ", "").trim()
-        if (spoofPackageSignature && cleanHex.isNotEmpty()) {
-            items += "originalSignatureHex" to cleanHex
-        }
-        items += listOf(
-            "softFailIntegrityChecks" to softFailIntegrity.toString(),
-            "hookSettingsLockToApp" to hookSettingsLockToApp.toString(),
-            "hookDevicePolicyPermitted" to hookDpmPermitted.toString(),
-            "debugLogging" to debugLogging.toString()
-        )
-        return items
-    }
-
-    fun toMorpheCliFlags(): String =
-        toMorpheOptionsPairs().joinToString(" ") { (k, v) ->
-            if (k == "originalSignatureHex") "-O\$k=\\"\$v\\"" else "-O\$k=\$v"
-        }
-
     fun toMorpheChecklist(): List<Pair<String, String>> = listOf(
-        "Spoof Timing Mode" to if (alwaysSpoofPinned) "Always Pinned (from launch)" else "Reactive (after startLockTask)",
-        "Disable Pinning (startLockTask / stopLockTask)" to if (hookActivityLockTask) "ON" else "OFF",
-        "Spoof ActivityManager Pin State" to if (hookActivityManagerState) "ON" else "OFF",
-        "Binder Stub\\\$Proxy LockTask Interception" to if (hookBinderProxies) "ON" else "OFF",
-        "Window Focus Spoofing (Safe)" to if (hideFocusLoss) "ON" else "OFF",
-        "WebView Visibility, JS & Pause Stealth" to if (hideWebViewVisibility) "ON" else "OFF",
-        "Suppress onPause / onStop" to if (hideLifecycleLoss) "ON" else "OFF",
-        "Hide Multi-Window & Picture-in-Picture" to if (hideMultiWindowPip) "ON" else "OFF",
-        "Simulate Pinned Window Insets" to if (spoofPinnedInsets) "ON" else "OFF",
-        "Strip FLAG_SECURE" to if (stripFlagSecure) "ON" else "OFF",
-        "Virtual Display & Screen Sharing Bypass" to if (bypassVirtualDisplays) "ON" else "OFF",
-        "Unblock Clipboard Clear" to if (unblockClipboard) "ON" else "OFF",
-        "Hide Accessibility & Overlay Checks" to if (hideAccessibilityOverlays) "ON" else "OFF",
-        "Retain Audio Focus" to if (retainAudioFocus) "ON" else "OFF",
-        "Cloak Packages & Play Store Installer" to if (cloakPackagesInstaller) "ON" else "OFF",
-        "Sanitize Stack Traces" to if (sanitizeStackTraces) "ON" else "OFF",
-        "Spoof Motion Sensors (Stationary)" to if (spoofMotionSensors) "ON" else "OFF",
-        "Static Package Signature Spoof" to if (spoofPackageSignature) "ON" else "OFF",
-        "Original Certificate DER Hex" to spoofSignatureHex.trim().ifEmpty { "(empty)" },
-        "Play Integrity / SafetyNet Soft-Fail" to if (softFailIntegrity) "ON" else "OFF",
-        "Spoof Settings.System lock_to_app_enabled" to if (hookSettingsLockToApp) "ON" else "OFF",
-        "Spoof DevicePolicyManager.isLockTaskPermitted" to if (hookDpmPermitted) "ON" else "OFF",
-        "Verbose Logcat Debug Logging" to if (debugLogging) "ON" else "OFF"
+        "Spoof Timing Mode" to if (alwaysSpoofPinned) {
+            "Always Pinned (from launch)"
+        } else {
+            "Reactive (after startLockTask)"
+        },
+        "Disable Pinning (startLockTask / stopLockTask)" to
+            if (masterEnabled && (hookActivityLockTask || hookActivityClient)) "ON" else "OFF",
+        "Spoof ActivityManager Pin State" to
+            if (masterEnabled && hookActivityManagerState) "ON" else "OFF",
+        "Binder Stub\\\$Proxy LockTask Interception (Advanced)" to
+            if (masterEnabled && hookBinderProxies) "ON" else "OFF",
+        "Window Focus Spoofing (Safe)" to
+            if (masterEnabled && hideFocusLoss) "ON" else "OFF",
+        "WebView Visibility, JS & Pause Stealth" to
+            if (masterEnabled && hideWebViewVisibility) "ON" else "OFF",
+        "Suppress onPause / onStop" to
+            if (masterEnabled && hideLifecycleLoss) "ON" else "OFF",
+        "Hide Multi-Window & Picture-in-Picture" to
+            if (masterEnabled && hideMultiWindowPip) "ON" else "OFF",
+        "Simulate Pinned Window Insets" to
+            if (masterEnabled && spoofPinnedInsets) "ON" else "OFF",
+        "Strip FLAG_SECURE" to
+            if (masterEnabled && stripFlagSecure) "ON" else "OFF",
+        "Virtual Display & Screen Sharing Bypass" to
+            if (masterEnabled && bypassVirtualDisplays) "ON" else "OFF",
+        "Unblock Clipboard Clear" to
+            if (masterEnabled && unblockClipboard) "ON" else "OFF",
+        "Hide Accessibility & Overlay Checks" to
+            if (masterEnabled && hideAccessibilityOverlays) "ON" else "OFF",
+        "Retain Audio Focus" to
+            if (masterEnabled && retainAudioFocus) "ON" else "OFF",
+        "Cloak Packages & Play Store Installer" to
+            if (masterEnabled && cloakPackagesInstaller) "ON" else "OFF",
+        "Sanitize Stack Traces" to
+            if (masterEnabled && sanitizeStackTraces) "ON" else "OFF",
+        "Spoof Motion Sensors (Stationary)" to
+            if (masterEnabled && spoofMotionSensors) "ON" else "OFF",
+        "Static Package Signature Spoof" to
+            if (masterEnabled && spoofPackageSignature) "ON" else "OFF",
+        "Original Certificate DER Hex" to
+            spoofSignatureHex.trim().ifEmpty { "(empty)" },
+        "Play Integrity / SafetyNet Soft-Fail" to
+            if (masterEnabled && softFailIntegrity) "ON" else "OFF",
+        "Spoof Settings.System lock_to_app_enabled" to
+            if (masterEnabled && hookSettingsLockToApp) "ON" else "OFF",
+        "Spoof DevicePolicyManager.isLockTaskPermitted" to
+            if (masterEnabled && hookDpmPermitted) "ON" else "OFF",
+        "Verbose Logcat Debug Logging" to
+            if (debugLogging) "ON" else "OFF"
     )
 
     fun toJson(targetPackage: String?): String = JSONObject().apply {
@@ -2755,9 +2741,6 @@ class PrefsManager(context: Context) {
 function generateMainActivityKt(config: ModuleConfig, pkg: string): string {
   return `package ${pkg}
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
@@ -2784,14 +2767,18 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -2807,7 +2794,6 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Code
-import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -2858,6 +2844,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -2872,12 +2859,14 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -2995,14 +2984,6 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     var showEventLogSheet by remember { mutableStateOf(false) }
     var eventLogFilter by remember { mutableStateOf("all") }
     var morpheOptionsTarget by remember { mutableStateOf<Pair<String, GranularHookState>?>(null) }
-
-    fun copyMorpheCliOptions(label: String, state: GranularHookState) {
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-        cm?.setPrimaryClip(ClipData.newPlainText("\$label Morphe CLI Options", state.toMorpheCliFlags()))
-        scope.launch {
-            snackbarHostState.showSnackbar("Copied Morphe CLI -O options for \$label")
-        }
-    }
 
     DisposableEffect(prefsManager, selectedPkg, lifecycleOwner) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
@@ -3210,11 +3191,16 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurface
                                 ),
-                                modifier = Modifier.weight(1f)
+                                contentPadding = PaddingValues(0.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
                             ) {
-                                Icon(Icons.Rounded.Upload, null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.size(6.dp))
-                                Text("Export JSON")
+                                Icon(
+                                    imageVector = Icons.Rounded.Upload,
+                                    contentDescription = "Export JSON",
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                             OutlinedButton(
                                 onClick = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
@@ -3223,30 +3209,16 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurface
                                 ),
-                                modifier = Modifier.weight(1f)
+                                contentPadding = PaddingValues(0.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
                             ) {
-                                Icon(Icons.Rounded.Download, null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.size(6.dp))
-                                Text("Import JSON")
-                            }
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = { copyMorpheCliOptions(selectedLabel, hookState) },
-                                shape = RoundedCornerShape(16.dp),
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                                colors = ButtonDefaults.outlinedButtonColors(
-                                    contentColor = MaterialTheme.colorScheme.onSurface
-                                ),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(Icons.Rounded.ContentCopy, null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.size(6.dp))
-                                Text("Copy Morphe CLI", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Icon(
+                                    imageVector = Icons.Rounded.Download,
+                                    contentDescription = "Import JSON",
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                             OutlinedButton(
                                 onClick = { morpheOptionsTarget = selectedLabel to hookState },
@@ -3255,11 +3227,16 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurface
                                 ),
-                                modifier = Modifier.weight(1f)
+                                contentPadding = PaddingValues(0.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
                             ) {
-                                Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.size(6.dp))
-                                Text("Morphe Checklist", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Icon(
+                                    imageVector = Icons.Rounded.Checklist,
+                                    contentDescription = "Morphe Patching Options",
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                         }
 
@@ -3319,7 +3296,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 )
                                 Text(
                                     text = if (selectedPkg == null) {
-                                        "Tap a tile to inspect triggered hooks · \${stats.cloakBypassed} cloak events"
+                                        "Tap a tile for method log · \${stats.cloakBypassed} cloak"
                                     } else {
                                         "\$selectedLabel · Tap a tile for method log"
                                     },
@@ -3714,6 +3691,8 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     // Inline Expandable App Rules + Per-App Presets Sheet
     if (showAppPicker) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+        val pickerListState = rememberLazyListState()
+        val navBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
         var query by remember { mutableStateOf("") }
         var appFilter by remember { mutableStateOf("all") }
         var expandedPkg by remember { mutableStateOf<String?>(selectedPkg) }
@@ -3831,14 +3810,39 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
 
                 Spacer(Modifier.height(10.dp))
 
-                LazyColumn(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .weight(1f),
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                        .weight(1f)
+                        .layout { measurable, constraints ->
+                            val offsetPx = runCatching { sheetState.requireOffset() }
+                                .getOrNull()
+                                ?.takeIf { !it.isNaN() }
+                                ?.roundToInt()
+                                ?.coerceAtLeast(0)
+                                ?: 0
+                            val visibleHeight = (constraints.maxHeight - offsetPx)
+                                .coerceIn(0, constraints.maxHeight)
+                            val placeable = measurable.measure(
+                                constraints.copy(minHeight = 0, maxHeight = visibleHeight)
+                            )
+                            layout(constraints.maxWidth, constraints.maxHeight) {
+                                placeable.place(0, 0)
+                            }
+                        }
                 ) {
-                    items(filtered, key = { it.packageName }) { app ->
+                    LazyColumn(
+                        state = pickerListState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = 20.dp,
+                            end = 20.dp,
+                            top = 4.dp,
+                            bottom = 24.dp + navBottomPadding
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(filtered, key = { it.packageName }) { app ->
                         val isExpanded = expandedPkg == app.packageName
                         val isCustom = overrideMap[app.packageName] == true
                         val appState = appStatesMap.getOrPut(app.packageName) {
@@ -4046,28 +4050,14 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                             }
                                         )
 
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        OutlinedButton(
+                                            onClick = { morpheOptionsTarget = app.label to appState },
+                                            shape = RoundedCornerShape(14.dp),
+                                            modifier = Modifier.fillMaxWidth()
                                         ) {
-                                            OutlinedButton(
-                                                onClick = { copyMorpheCliOptions(app.label, appState) },
-                                                shape = RoundedCornerShape(14.dp),
-                                                modifier = Modifier.weight(1f)
-                                            ) {
-                                                Icon(Icons.Rounded.ContentCopy, null, modifier = Modifier.size(16.dp))
-                                                Spacer(Modifier.size(6.dp))
-                                                Text("Copy Morphe CLI", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            }
-                                            OutlinedButton(
-                                                onClick = { morpheOptionsTarget = app.label to appState },
-                                                shape = RoundedCornerShape(14.dp),
-                                                modifier = Modifier.weight(1f)
-                                            ) {
-                                                Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
-                                                Spacer(Modifier.size(6.dp))
-                                                Text("Checklist", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            }
+                                            Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.size(8.dp))
+                                            Text("Morphe Patching Options")
                                         }
 
                                         FilledTonalButton(
@@ -4091,6 +4081,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             }
                         }
                     }
+                    }
                 }
             }
         }
@@ -4099,6 +4090,8 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     // Live Hook Event Log Drawer (opened by tapping any StatTile)
     if (showEventLogSheet) {
         val logSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+        val logListState = rememberLazyListState()
+        val navBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
         val filterChips = listOf(
             "all" to "All",
             "pin" to "Pinning",
@@ -4113,103 +4106,129 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         }
         val timeFmt = remember { DateFormat.getTimeInstance(DateFormat.MEDIUM) }
 
+        LaunchedEffect(eventLogFilter) {
+            logListState.scrollToItem(0)
+        }
+
         ModalBottomSheet(
             onDismissRequest = { showEventLogSheet = false },
             sheetState = logSheetState
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+            Column(modifier = Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Live Hook Event Log",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = selectedPkg ?: "All scoped apps",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(
-                        onClick = {
-                            prefsManager.resetStats(selectedPkg)
-                            stats = HookStats()
-                            eventLog = prefsManager.loadEventLog(selectedPkg)
-                        }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = "Reset event log"
-                        )
-                    }
-                }
-
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    filterChips.forEach { (id, label) ->
-                        FilterChip(
-                            selected = eventLogFilter == id,
-                            onClick = { eventLogFilter = id },
-                            label = { Text(label) }
-                        )
-                    }
-                }
-
-                FilledTonalButton(
-                    onClick = {
-                        if (eventLog.isEmpty()) {
-                            scope.launch {
-                                snackbarHostState.showSnackbar("No recorded hits yet — launch the target app first")
-                            }
-                            return@FilledTonalButton
-                        }
-                        val (prunedState, disabledCount) = hookState.pruneUnusedHooks(eventLog)
-                        updateState { prunedState }
-                        scope.launch {
-                            snackbarHostState.showSnackbar(
-                                if (disabledCount > 0) {
-                                    "Kept active hooks for \$selectedLabel · disabled \$disabledCount unused"
-                                } else {
-                                    "All enabled hooks already have active hits"
-                                }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Live Hook Event Log",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = selectedPkg ?: "All scoped apps",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                    },
-                    enabled = eventLog.isNotEmpty(),
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.AutoFixHigh,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(Modifier.size(8.dp))
-                    Text("Keep Active Only (Prune 0-Hit Hooks)")
+                        IconButton(
+                            onClick = {
+                                prefsManager.resetStats(selectedPkg)
+                                stats = HookStats()
+                                eventLog = prefsManager.loadEventLog(selectedPkg)
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "Reset event log"
+                            )
+                        }
+                    }
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        filterChips.forEach { (id, label) ->
+                            FilterChip(
+                                selected = eventLogFilter == id,
+                                onClick = { eventLogFilter = id },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+
+                    FilledTonalButton(
+                        onClick = {
+                            if (eventLog.isEmpty()) {
+                                scope.launch {
+                                    snackbarHostState.showSnackbar("No recorded hits yet — launch the target app first")
+                                }
+                                return@FilledTonalButton
+                            }
+                            val (prunedState, disabledCount) = hookState.pruneUnusedHooks(eventLog)
+                            updateState { prunedState }
+                            scope.launch {
+                                snackbarHostState.showSnackbar(
+                                    if (disabledCount > 0) {
+                                        "Kept active hooks for \$selectedLabel · disabled \$disabledCount unused"
+                                    } else {
+                                        "All enabled hooks already have active hits"
+                                    }
+                                )
+                            }
+                        },
+                        enabled = eventLog.isNotEmpty(),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AutoFixHigh,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.size(8.dp))
+                        Text("Keep Active Only (Prune 0-Hit Hooks)")
+                    }
                 }
+
+                Spacer(Modifier.height(10.dp))
 
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
+                        .layout { measurable, constraints ->
+                            val offsetPx = runCatching { logSheetState.requireOffset() }
+                                .getOrNull()
+                                ?.takeIf { !it.isNaN() }
+                                ?.roundToInt()
+                                ?.coerceAtLeast(0)
+                                ?: 0
+                            val visibleHeight = (constraints.maxHeight - offsetPx)
+                                .coerceIn(0, constraints.maxHeight)
+                            val placeable = measurable.measure(
+                                constraints.copy(minHeight = 0, maxHeight = visibleHeight)
+                            )
+                            layout(constraints.maxWidth, constraints.maxHeight) {
+                                placeable.place(0, 0)
+                            }
+                        }
                 ) {
                     if (filteredEntries.isEmpty()) {
                         Surface(
                             shape = RoundedCornerShape(18.dp),
                             color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp)
                         ) {
                             Text(
                                 text = "No hook events recorded for this filter yet. Launch a scoped target app and trigger pinning or focus transitions.",
@@ -4220,11 +4239,20 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         }
                     } else {
                         LazyColumn(
+                            state = logListState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(bottom = 24.dp),
+                            contentPadding = PaddingValues(
+                                start = 20.dp,
+                                end = 20.dp,
+                                top = 4.dp,
+                                bottom = 24.dp + navBottomPadding
+                            ),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            items(filteredEntries) { entry ->
+                            items(
+                                items = filteredEntries,
+                                key = { "\${it.pkg}|\${it.category}|\${it.method}" }
+                            ) { entry ->
                                 EventLogRow(entry = entry, formattedTime = timeFmt.format(Date(entry.timestampMs)))
                             }
                         }
@@ -4234,16 +4262,15 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         }
     }
 
-    // Morphe CLI & Manager Checklist Dialog
+    // Morphe Patching Options Checklist Dialog
     morpheOptionsTarget?.let { (targetTitle, targetState) ->
-        val cliFlags = remember(targetState) { targetState.toMorpheCliFlags() }
         val checklist = remember(targetState) { targetState.toMorpheChecklist() }
 
         AlertDialog(
             onDismissRequest = { morpheOptionsTarget = null },
             title = {
                 Column {
-                    Text("Morphe Patch Options", fontWeight = FontWeight.SemiBold)
+                    Text("Morphe Patching Options", fontWeight = FontWeight.SemiBold)
                     Text(
                         text = targetTitle,
                         style = MaterialTheme.typography.bodySmall,
@@ -4257,84 +4284,58 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         .fillMaxWidth()
                         .heightIn(max = 420.dp)
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "Morphe Desktop CLI (-O Flags)",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
+                        text = if (targetState.masterEnabled) {
+                            "Enable these toggles in Morphe Manager under PinSpoof Patching Options:"
+                        } else {
+                            "Master switch is OFF for this config — all hooks are shown OFF:"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = cliFlags,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.padding(12.dp)
-                        )
-                    }
-
-                    Text(
-                        text = "Morphe Manager Checklist",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        checklist.forEach { (optName, optValue) ->
-                            val isActiveVal = optValue == "ON" || optValue.startsWith("Always")
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                    checklist.forEach { (optName, optValue) ->
+                        val isActiveVal = optValue == "ON" || optValue.startsWith("Always")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = optName,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 8.dp)
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isActiveVal) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerHighest
+                                }
                             ) {
                                 Text(
-                                    text = optName,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(end = 8.dp)
-                                )
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
+                                    text = optValue,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
                                     color = if (isActiveVal) {
-                                        MaterialTheme.colorScheme.primaryContainer
+                                        MaterialTheme.colorScheme.onPrimaryContainer
                                     } else {
-                                        MaterialTheme.colorScheme.surfaceContainerHighest
-                                    }
-                                ) {
-                                    Text(
-                                        text = optValue,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = if (isActiveVal) {
-                                            MaterialTheme.colorScheme.onPrimaryContainer
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        },
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                    )
-                                }
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
                             }
                         }
                     }
                 }
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        copyMorpheCliOptions(targetTitle, targetState)
-                        morpheOptionsTarget = null
-                    }
-                ) {
-                    Text("Copy -O Flags")
-                }
-            },
-            dismissButton = {
                 TextButton(onClick = { morpheOptionsTarget = null }) {
                     Text("Close")
                 }
@@ -4789,7 +4790,7 @@ function generateProguardRules(pkg: string): string {
 
 function generateGithubWorkflow(config: ModuleConfig): string {
   const folderName = config.moduleName.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'PinSpoof';
-  const ver = config.versionName.trim() || '1.3.2';
+  const ver = config.versionName.trim() || '1.4.0';
   return `name: Build ${config.moduleName} APK & Morphe Patches
 
 on:
@@ -7111,60 +7112,54 @@ private class JsonCompatibility(
 
 function generateReadme(config: ModuleConfig, pkg: string): string {
   const folderName = config.moduleName.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'PinSpoof';
-  const ver = config.versionName.trim() || '1.3.2';
+  const ver = config.versionName.trim() || '1.4.0';
   return `# ${config.moduleName}
 
-App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundle (\`${folderName}-v${ver}.apk\` / \`${folderName}-v${ver}.mpp\`) targeting **Android 7.0 – Android 16 (API ${config.minSdk}–${config.targetSdk})**:
+App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundle targeting **Android 7.0 – Android 16 (API ${config.minSdk}–${config.targetSdk})**:
 
-1. **Disables System App Pinning**: Intercepts \`Activity.startLockTask()\`, \`Activity.stopLockTask()\`, \`ActivityClient\`, and optional Binder \`Stub\$Proxy\` calls (with dynamic OEM-safe method scanning) locally within the target app's ART process without modifying \`system_server\`.
-2. **Emulates Pinned State**: Reports \`ActivityManager.getLockTaskModeState()\` -> \`LOCK_TASK_MODE_PINNED\` (\`2\`) and \`isInLockTaskMode()\` -> \`true\` in safe **Reactive** mode by default (or optional **Always Pinned**), alongside optional \`Settings.System\` (\`lock_to_app_enabled\`) and \`DevicePolicyManager.isLockTaskPermitted()\` overrides.
-3. **Preserves Foreground, WebView & Display State**:
-   - **Window Focus Spoofing (Safe Default)**: Drops \`View.dispatchWindowFocusChanged(false)\`, \`ViewTreeObserver\`, \`DecorView\`, \`Dialog\`/\`Window.Callback\`, \`Activity.performTopResumedActivityChanged(false)\`, \`ACTION_CLOSE_SYSTEM_DIALOGS\` broadcasts, safe \`onUserLeaveHint()\`, maintains \`hasWindowFocus() -> true\`, and keeps \`ActivityManager.getMyMemoryState()\` / \`getRunningAppProcesses()\` at \`IMPORTANCE_FOREGROUND\`.
-   - **WebView Visibility, JS & Pause Stealth**: Forces \`WebView\` visibility \`VISIBLE\`, blocks \`WebView.onPause()\` / \`pauseTimers()\` / \`onVisibilityAggregated(false)\`, and injects DOM stealth (\`document.hidden = false\`, \`document.visibilityState = "visible"\`, \`document.hasFocus = () => true\`, \`visibilitychange\` / \`blur\` / \`focusout\` / \`pagehide\` / \`freeze\` suppression).
-   - **Lifecycle Suppression**: Enabled by default in \`Balanced\` and Morphe for complete Recents stealth; blocks \`onPause()\`, \`onStop()\`, \`Fragment\` transitions, \`Application.ActivityLifecycleCallbacks\`, and \`LifecycleRegistry\` (\`ON_PAUSE\`/\`ON_STOP\`). Disable or switch to \`Light\` if a \`SurfaceView\`/game stalls on resume.
-   - **Display, Media & UI Bypass**: Simulate zeroed pinned \`WindowInsets\`, strip \`FLAG_SECURE\`, expose only \`Display.DEFAULT_DISPLAY\` for virtual/screen-sharing bypass, unblock \`ClipboardManager.clearPrimaryClip()\`, hide \`AccessibilityManager\` / overlay checks, and retain \`AudioManager\` focus.
-4. **Anti-Detection & Integrity Cloaking**:
-   - **Package & Installer Cloaking**: Report \`com.android.vending\` as installer and hide Xposed / LSPosed / Morphe manager packages from \`PackageManager\`.
-   - **Stack Trace Sanitization & Motion Sensors**: Strip hook frames from \`Thread\` / \`Throwable.getStackTrace()\` and clamp accelerometer/gyroscope readings to resting desk values.
-   - **Signature & Play Integrity Handling**: Optional \`PackageInfo.signatures\` / \`SigningInfo\` replacement via Certificate DER Hex and soft-fail clearing on Integrity / SafetyNet \`Task.getException()\`.
-5. **Accessible Anywhere**:
-   - **Morphe Patching (No Root / No Xposed)**: All controls are exposed directly as **Morphe Patching Options** inside \`${folderName}-v${ver}.mpp\` (universal patch, works on any APK). Export per-app LSPosed configs straight to **Morphe CLI \`-O\` flags** or view an interactive **Morphe Manager Checklist**.
-   - **LSPosed Xposed + Material 3 Expressive UI**: Searchable & filterable app picker (\`All\`, \`Modified\`, \`Active Hits\`), inline expandable per-app rules & presets (\`Light\`, \`Balanced\`, \`Aggressive\`), JSON export/import, and a tappable **Live Hook Event Counter** with **Keep Active Only (Prune 0-Hit Hooks)** via \`xposedsharedprefs\`.
+1. **Disables System App Pinning**: Intercepts \`Activity.startLockTask()\`, \`Activity.stopLockTask()\`, \`ActivityClient\`, and Binder \`Stub$Proxy\` calls locally within the target app's ART process without modifying \`system_server\`.
+2. **Emulates Pinned State**: Reports \`ActivityManager.getLockTaskModeState()\` -> \`LOCK_TASK_MODE_PINNED\` (\`2\`) and \`isInLockTaskMode()\` -> \`true\` when active, alongside optional \`Settings.System\` (\`lock_to_app_enabled\`) and \`DevicePolicyManager.isLockTaskPermitted()\` overrides.
+3. **Preserves Foreground, Focus & Recents State**:
+   - Filters \`BroadcastReceiver.onReceive()\` for \`Intent.ACTION_CLOSE_SYSTEM_DIALOGS\` (\`recentapps\` / \`homekey\`) via dynamic \`registerReceiver\` hooking in LSPosed and direct bytecode patching in Morphe.
+   - Suppresses \`onWindowFocusChanged(false)\` across \`Activity\`, app subclasses, \`DecorView\`, \`Dialog\`, and \`Window.Callback\` listeners, plus API 29+ \`Activity.onTopResumedActivityChanged(false)\` and \`onUserLeaveHint()\`.
+   - Keeps \`hasWindowFocus() -> true\` and reports \`IMPORTANCE_FOREGROUND\` across both \`ActivityManager.getMyMemoryState()\` and \`ActivityManager.getRunningAppProcesses()\`.
+4. **WebView & Fragment Lifecycle Continuity**:
+   - Injects DOM focus/visibility continuity across \`onPageStarted\`, \`onPageFinished\`, \`onAttachedToWindow\`, \`setWebViewClient()\`, and \`loadUrl()\`, suppressing \`focusout\`, \`pagehide\`, \`freeze\`, \`blur\`, \`visibilitychange\`, and \`webkitvisibilitychange\` while preserving \`document.hidden = false\`, \`document.visibilityState = "visible"\`, and \`document.hasFocus() = true\`.
+   - Maintains \`WebView.getWindowVisibility() -> View.VISIBLE\`, \`dispatchWindowVisibilityChanged\`, and API 24+ \`onVisibilityAggregated(false) -> true\`.
+   - Extends \`onPause()\` / \`onStop()\` preservation to \`androidx.fragment.app.Fragment\`, \`android.app.Fragment\`, \`Application.ActivityLifecycleCallbacks\`, and \`LifecycleRegistry\` (\`ON_PAUSE\` / \`ON_STOP\`).
+5. **Display, Media, Sensor & Environment Compatibility**:
+   - **Display & Screenshot Controls**: Removes \`FLAG_SECURE\` on \`Window\` and \`SurfaceView\` so screenshots and screen recording work normally, simulates zeroed pinned \`WindowInsets\`, and exposes \`Display.DEFAULT_DISPLAY\` in \`DisplayManager\` while filtering secondary display callbacks.
+   - **Audio & Clipboard Preservation**: Retains \`AudioManager\` audio focus across interruptions and blocks \`ClipboardManager.clearPrimaryClip()\` or blank \`setPrimaryClip()\` clipboard wipes.
+   - **Motion Sensor Stabilization**: Provides steady resting readings for accelerometer, gravity, gyroscope, and linear-acceleration events and suppresses \`TYPE_SIGNIFICANT_MOTION\` triggers for apps that interrupt UI sessions when the device is moved.
+   - **Environment, Signature & Integrity Compatibility**: Reports \`com.android.vending\` as the package installer, filters framework/module packages from \`PackageManager\` queries, keeps \`Thread.getStackTrace()\` / \`Throwable.getStackTrace()\` clean of hook frames, filters \`AccessibilityManager\` and overlay state checks, and offers optional original signing certificate DER hex preservation (\`PackageInfo.signatures\` / \`SigningInfo\`) plus graceful \`Task.getException()\` handling for Morphe-repackaged APKs.
+6. **Material 3 Expressive UI & Live Hook Inspector**:
+   - Configure global defaults or inline per-app overrides with one-tap **Light**, **Balanced**, and **Aggressive** presets, throttled live \`XSharedPreferences\` reloading, JSON profile import/export, real-time hook counters (**Pinning**, **Focus**, **WebView**, **Lifecycle**), and a fullscreen-expandable method-level **Live Hook Event Log** drawer.
 
 ## Practical Usage
 
 ${config.moduleName} lets you stay in control of multitasking and system navigation without breaking apps that lock the screen or reset their state during brief interruptions:
 
 - **Keep Android Navigation & Recents Unlocked**: Prevent apps from locking your device into Screen Pinning so the Back button, Recents overview, gesture navigation, Quick Settings, and notifications always remain usable without disrupting the app's internal layout or navigation state.
-- **Multitask Without State Resets or Media Pauses**: Open Recents, pull down the notification shade, check a reference note, reply to a message, or use floating/split-screen windows without triggering unwanted WebView playback/timer pauses, aggressive activity teardowns, clipboard wipes, or full state resets.
-- **No \`system_server\` Scoping Required**: Unlike legacy pinning modules that target the Android System Framework (\`android\`), ${config.moduleName} operates strictly inside the scoped target app process (or directly inside a Morphe-patched APK without root or LSPosed).
-- **Per-App Presets & One-Tap Hook Pruning**: Test an app under \`Balanced\` or \`Aggressive\`, open the **Live Hook Event Log**, tap **Keep Active Only** to prune unused 0-hit hooks automatically, and copy the resulting rules directly as Morphe \`-O\` CLI flags.
+- **Multitask Without State Resets, Clipboard Wipes, or Media Pauses**: Open Recents, pull down the notification shade, check a reference note, reply to a message, or use floating/split-screen windows without triggering unwanted WebView playback/timer pauses, audio focus drops, clipboard clears, or full activity teardowns.
+- **Take Screenshots & Cast Freely**: Strip restrictive \`FLAG_SECURE\` flags and secondary-display warnings so you can take personal screenshots, record your screen, or mirror displays without apps blanking out or complaining.
+- **No \`system_server\` Scoping Required**: Unlike legacy pinning modules that hook the Android System Framework (\`android\`), ${config.moduleName} operates strictly inside the scoped target app process (or directly inside a Morphe-patched APK without root or LSPosed).
+- **One-Tap Presets & Live Hook Diagnostics**: Start immediately with the **Balanced** default profile, switch to **Light** (pinning-only) for games or \`SurfaceView\`-heavy apps, or inspect real-time method hit counts in the Live Hook Event Log to see exactly which hooks an app triggers.
 
 ## Option 1: Morphe Patching (No Root / No Xposed)
 
-> **Note:** Morphe re-signs the patched APK. Apps that enforce signature verification can use **Static Package Signature Spoof** with your original certificate DER hex, or use **Option 2 (LSPosed)**.
+> **Note:** Morphe re-signs the patched APK. For apps that check signing certificates or client integrity APIs, enable the optional signing certificate DER hex and integrity compatibility toggles in Patching Options, or use **Option 2 (LSPosed)**.
 
-1. Download the \`${folderName}-morphe-patches\` artifact (\`${folderName}-v${ver}.mpp\`) built by \`.github/workflows/build-apk.yml\`, or build locally in \`morphe-patches/\`:
-   \`\`\`bash
-   gradle :patches:buildAndroid :patches:generatePatchesList
-   \`\`\`
-2. Import \`${folderName}-v${ver}.mpp\` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI** (use **Copy Morphe CLI** in the ${config.moduleName} app to paste \`-O\` flags directly).
-3. Pick any target APK, open **Patching Options** on the **${config.moduleName}** universal patch to configure:
-   - **\`Spoof Timing Mode\`**: \`Reactive (after startLockTask)\` (default) or \`Always Pinned (from launch)\`.
-   - **\`Disable Pinning (startLockTask / stopLockTask)\`** & **\`Binder Stub\$Proxy LockTask Interception\`**.
-   - **\`Spoof ActivityManager Pin State\`** & **\`Hide Multi-Window & Picture-in-Picture\`**.
-   - **\`Window Focus Spoofing (Safe)\`**, **\`WebView Visibility, JS & Pause Stealth\`**, & **\`Suppress onPause / onStop\`**.
-   - **\`Simulate Pinned Window Insets\`**, **\`Strip FLAG_SECURE\`**, **\`Virtual Display & Screen Sharing Bypass\`**, **\`Unblock Clipboard Clear\`**, **\`Hide Accessibility & Overlay Checks\`**, & **\`Retain Audio Focus\`**.
-   - **\`Cloak Packages & Play Store Installer\`**, **\`Sanitize Stack Traces\`**, **\`Spoof Motion Sensors (Stationary)\`**, **\`Static Package Signature Spoof\`** + **\`Original Certificate DER Hex\`**, & **\`Play Integrity / SafetyNet Soft-Fail\`**.
-   - **\`Spoof Settings.System lock_to_app_enabled\`**, **\`Spoof DevicePolicyManager.isLockTaskPermitted\`**, & **\`Verbose Logcat Debug Logging\`**.
+1. Download \`${folderName}-v${ver}.mpp\` from [Releases](https://github.com/redcatxus/PinSpoof/releases) (or build locally in \`morphe-patches/\` via \`gradle :patches:buildAndroid :patches:generatePatchesList\`).
+2. Import \`${folderName}-v${ver}.mpp\` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI**.
+3. Pick any target APK and open **Patching Options** on the **${config.moduleName}** patch to customize your preset or individual toggles (pinning, Recents broadcasts, window focus, WebView JS/visibility, lifecycle preservation, multi-window/PiP, display/screenshot/audio/clipboard controls, sensor stabilization, and environment/signature compatibility).
 4. Patch and install the modified APK.
 
 ## Option 2: LSPosed Setup
 
-1. Install \`${folderName}-v${ver}.apk\` (from \`${folderName}-apks\`).
+1. Install **\`${folderName}-v${ver}.apk\`** (\`versionCode: ${config.versionCode}\`) from [Releases](https://github.com/redcatxus/PinSpoof/releases).
 2. Open **LSPosed Manager** -> **Modules** -> **${config.moduleName}**.
 3. Enable the module and select **only the target apps** you want to affect (keep **System Framework (\`android\`) UNCHECKED**).
-4. Open **${config.moduleName}**, tap **Select App Override** (search or filter by \`All\`, \`Modified\`, or \`Active Hits\`) to expand inline per-app rules/presets (\`Light\` / \`Balanced\` / \`Aggressive\`), tap **Live Hook Event Counter** tiles to inspect/prune unused hooks, or export configs as JSON / Morphe CLI \`-O\` flags.
+4. Open the **${config.moduleName}** companion app to select a preset (**Light**, **Balanced**, **Aggressive**) or customize granular toggles globally or per app, open the **Morphe Patch Options** checklist to mirror toggles into Morphe Manager, then force-stop and relaunch your target app.
 
 - **Package ID**: \`${pkg}\`
 - **Entry Class**: \`${pkg}.PinSpoofModule\`

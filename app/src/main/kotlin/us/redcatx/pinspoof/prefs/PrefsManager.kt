@@ -203,70 +203,56 @@ data class GranularHookState(
         return next to disabledCount
     }
 
-    fun toMorpheOptionsPairs(): List<Pair<String, String>> {
-        val timing = if (alwaysSpoofPinned) "always" else "reactive"
-        val items = mutableListOf(
-            "spoofTiming" to timing,
-            "hookActivityLockTask" to hookActivityLockTask.toString(),
-            "hookActivityManagerState" to hookActivityManagerState.toString(),
-            "hookBinderProxies" to hookBinderProxies.toString(),
-            "hideFocusLoss" to hideFocusLoss.toString(),
-            "hideWebViewVisibility" to hideWebViewVisibility.toString(),
-            "hideLifecycleLoss" to hideLifecycleLoss.toString(),
-            "hideMultiWindowAndPip" to hideMultiWindowPip.toString(),
-            "spoofPinnedInsets" to spoofPinnedInsets.toString(),
-            "stripFlagSecure" to stripFlagSecure.toString(),
-            "bypassVirtualDisplays" to bypassVirtualDisplays.toString(),
-            "unblockClipboard" to unblockClipboard.toString(),
-            "hideAccessibilityAndOverlays" to hideAccessibilityOverlays.toString(),
-            "retainAudioFocus" to retainAudioFocus.toString(),
-            "cloakPackagesAndInstaller" to cloakPackagesInstaller.toString(),
-            "sanitizeStackTraces" to sanitizeStackTraces.toString(),
-            "spoofMotionSensors" to spoofMotionSensors.toString(),
-            "spoofPackageSignature" to spoofPackageSignature.toString()
-        )
-        val cleanHex = spoofSignatureHex.replace(":", "").replace(" ", "").trim()
-        if (spoofPackageSignature && cleanHex.isNotEmpty()) {
-            items += "originalSignatureHex" to cleanHex
-        }
-        items += listOf(
-            "softFailIntegrityChecks" to softFailIntegrity.toString(),
-            "hookSettingsLockToApp" to hookSettingsLockToApp.toString(),
-            "hookDevicePolicyPermitted" to hookDpmPermitted.toString(),
-            "debugLogging" to debugLogging.toString()
-        )
-        return items
-    }
-
-    fun toMorpheCliFlags(): String =
-        toMorpheOptionsPairs().joinToString(" ") { (k, v) ->
-            if (k == "originalSignatureHex") "-O$k=\"$v\"" else "-O$k=$v"
-        }
-
     fun toMorpheChecklist(): List<Pair<String, String>> = listOf(
-        "Spoof Timing Mode" to if (alwaysSpoofPinned) "Always Pinned (from launch)" else "Reactive (after startLockTask)",
-        "Disable Pinning (startLockTask / stopLockTask)" to if (hookActivityLockTask) "ON" else "OFF",
-        "Spoof ActivityManager Pin State" to if (hookActivityManagerState) "ON" else "OFF",
-        "Binder Stub\$Proxy LockTask Interception" to if (hookBinderProxies) "ON" else "OFF",
-        "Window Focus Spoofing (Safe)" to if (hideFocusLoss) "ON" else "OFF",
-        "WebView Visibility, JS & Pause Stealth" to if (hideWebViewVisibility) "ON" else "OFF",
-        "Suppress onPause / onStop" to if (hideLifecycleLoss) "ON" else "OFF",
-        "Hide Multi-Window & Picture-in-Picture" to if (hideMultiWindowPip) "ON" else "OFF",
-        "Simulate Pinned Window Insets" to if (spoofPinnedInsets) "ON" else "OFF",
-        "Strip FLAG_SECURE" to if (stripFlagSecure) "ON" else "OFF",
-        "Virtual Display & Screen Sharing Bypass" to if (bypassVirtualDisplays) "ON" else "OFF",
-        "Unblock Clipboard Clear" to if (unblockClipboard) "ON" else "OFF",
-        "Hide Accessibility & Overlay Checks" to if (hideAccessibilityOverlays) "ON" else "OFF",
-        "Retain Audio Focus" to if (retainAudioFocus) "ON" else "OFF",
-        "Cloak Packages & Play Store Installer" to if (cloakPackagesInstaller) "ON" else "OFF",
-        "Sanitize Stack Traces" to if (sanitizeStackTraces) "ON" else "OFF",
-        "Spoof Motion Sensors (Stationary)" to if (spoofMotionSensors) "ON" else "OFF",
-        "Static Package Signature Spoof" to if (spoofPackageSignature) "ON" else "OFF",
-        "Original Certificate DER Hex" to spoofSignatureHex.trim().ifEmpty { "(empty)" },
-        "Play Integrity / SafetyNet Soft-Fail" to if (softFailIntegrity) "ON" else "OFF",
-        "Spoof Settings.System lock_to_app_enabled" to if (hookSettingsLockToApp) "ON" else "OFF",
-        "Spoof DevicePolicyManager.isLockTaskPermitted" to if (hookDpmPermitted) "ON" else "OFF",
-        "Verbose Logcat Debug Logging" to if (debugLogging) "ON" else "OFF"
+        "Spoof Timing Mode" to if (alwaysSpoofPinned) {
+            "Always Pinned (from launch)"
+        } else {
+            "Reactive (after startLockTask)"
+        },
+        "Disable Pinning (startLockTask / stopLockTask)" to
+            if (masterEnabled && (hookActivityLockTask || hookActivityClient)) "ON" else "OFF",
+        "Spoof ActivityManager Pin State" to
+            if (masterEnabled && hookActivityManagerState) "ON" else "OFF",
+        "Binder Stub\$Proxy LockTask Interception (Advanced)" to
+            if (masterEnabled && hookBinderProxies) "ON" else "OFF",
+        "Window Focus Spoofing (Safe)" to
+            if (masterEnabled && hideFocusLoss) "ON" else "OFF",
+        "WebView Visibility, JS & Pause Stealth" to
+            if (masterEnabled && hideWebViewVisibility) "ON" else "OFF",
+        "Suppress onPause / onStop" to
+            if (masterEnabled && hideLifecycleLoss) "ON" else "OFF",
+        "Hide Multi-Window & Picture-in-Picture" to
+            if (masterEnabled && hideMultiWindowPip) "ON" else "OFF",
+        "Simulate Pinned Window Insets" to
+            if (masterEnabled && spoofPinnedInsets) "ON" else "OFF",
+        "Strip FLAG_SECURE" to
+            if (masterEnabled && stripFlagSecure) "ON" else "OFF",
+        "Virtual Display & Screen Sharing Bypass" to
+            if (masterEnabled && bypassVirtualDisplays) "ON" else "OFF",
+        "Unblock Clipboard Clear" to
+            if (masterEnabled && unblockClipboard) "ON" else "OFF",
+        "Hide Accessibility & Overlay Checks" to
+            if (masterEnabled && hideAccessibilityOverlays) "ON" else "OFF",
+        "Retain Audio Focus" to
+            if (masterEnabled && retainAudioFocus) "ON" else "OFF",
+        "Cloak Packages & Play Store Installer" to
+            if (masterEnabled && cloakPackagesInstaller) "ON" else "OFF",
+        "Sanitize Stack Traces" to
+            if (masterEnabled && sanitizeStackTraces) "ON" else "OFF",
+        "Spoof Motion Sensors (Stationary)" to
+            if (masterEnabled && spoofMotionSensors) "ON" else "OFF",
+        "Static Package Signature Spoof" to
+            if (masterEnabled && spoofPackageSignature) "ON" else "OFF",
+        "Original Certificate DER Hex" to
+            spoofSignatureHex.trim().ifEmpty { "(empty)" },
+        "Play Integrity / SafetyNet Soft-Fail" to
+            if (masterEnabled && softFailIntegrity) "ON" else "OFF",
+        "Spoof Settings.System lock_to_app_enabled" to
+            if (masterEnabled && hookSettingsLockToApp) "ON" else "OFF",
+        "Spoof DevicePolicyManager.isLockTaskPermitted" to
+            if (masterEnabled && hookDpmPermitted) "ON" else "OFF",
+        "Verbose Logcat Debug Logging" to
+            if (debugLogging) "ON" else "OFF"
     )
 
     fun toJson(targetPackage: String?): String = JSONObject().apply {

@@ -32,8 +32,8 @@ export function InstallGuide({
     },
     {
       index: '04.',
-      title: 'Prune Hooks & Export Morphe CLI',
-      body: `Tap Live Hook Event Counter tiles to prune 0-hit hooks via Keep Active Only, or copy per-app settings as Morphe CLI -O flags and checklists.`,
+      title: 'Prune Hooks & View Morphe Options',
+      body: `Tap Live Hook Event Counter tiles to prune 0-hit hooks via Keep Active Only, or open the Morphe Patch Options checklist for any configured app.`,
     },
   ];
 

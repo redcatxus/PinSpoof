@@ -1,8 +1,5 @@
 package us.redcatx.pinspoof
 
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ApplicationInfo
@@ -29,14 +26,18 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -52,7 +53,6 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Checklist
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Code
-import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.ExpandLess
@@ -103,6 +103,7 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -117,12 +118,14 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlin.math.roundToInt
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -240,14 +243,6 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     var showEventLogSheet by remember { mutableStateOf(false) }
     var eventLogFilter by remember { mutableStateOf("all") }
     var morpheOptionsTarget by remember { mutableStateOf<Pair<String, GranularHookState>?>(null) }
-
-    fun copyMorpheCliOptions(label: String, state: GranularHookState) {
-        val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-        cm?.setPrimaryClip(ClipData.newPlainText("$label Morphe CLI Options", state.toMorpheCliFlags()))
-        scope.launch {
-            snackbarHostState.showSnackbar("Copied Morphe CLI -O options for $label")
-        }
-    }
 
     DisposableEffect(prefsManager, selectedPkg, lifecycleOwner) {
         val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
@@ -455,11 +450,16 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurface
                                 ),
-                                modifier = Modifier.weight(1f)
+                                contentPadding = PaddingValues(0.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
                             ) {
-                                Icon(Icons.Rounded.Upload, null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.size(6.dp))
-                                Text("Export JSON")
+                                Icon(
+                                    imageVector = Icons.Rounded.Upload,
+                                    contentDescription = "Export JSON",
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                             OutlinedButton(
                                 onClick = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
@@ -468,30 +468,16 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurface
                                 ),
-                                modifier = Modifier.weight(1f)
+                                contentPadding = PaddingValues(0.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
                             ) {
-                                Icon(Icons.Rounded.Download, null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.size(6.dp))
-                                Text("Import JSON")
-                            }
-                        }
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            OutlinedButton(
-                                onClick = { copyMorpheCliOptions(selectedLabel, hookState) },
-                                shape = RoundedCornerShape(16.dp),
-                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                                colors = ButtonDefaults.outlinedButtonColors(
-                                    contentColor = MaterialTheme.colorScheme.onSurface
-                                ),
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Icon(Icons.Rounded.ContentCopy, null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.size(6.dp))
-                                Text("Copy Morphe CLI", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Icon(
+                                    imageVector = Icons.Rounded.Download,
+                                    contentDescription = "Import JSON",
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                             OutlinedButton(
                                 onClick = { morpheOptionsTarget = selectedLabel to hookState },
@@ -500,11 +486,16 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurface
                                 ),
-                                modifier = Modifier.weight(1f)
+                                contentPadding = PaddingValues(0.dp),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(44.dp)
                             ) {
-                                Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
-                                Spacer(Modifier.size(6.dp))
-                                Text("Morphe Checklist", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Icon(
+                                    imageVector = Icons.Rounded.Checklist,
+                                    contentDescription = "Morphe Patching Options",
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                         }
 
@@ -564,7 +555,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 )
                                 Text(
                                     text = if (selectedPkg == null) {
-                                        "Tap a tile to inspect triggered hooks · ${stats.cloakBypassed} cloak events"
+                                        "Tap a tile for method log · ${stats.cloakBypassed} cloak"
                                     } else {
                                         "$selectedLabel · Tap a tile for method log"
                                     },
@@ -959,6 +950,8 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     // Inline Expandable App Rules + Per-App Presets Sheet
     if (showAppPicker) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+        val pickerListState = rememberLazyListState()
+        val navBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
         var query by remember { mutableStateOf("") }
         var appFilter by remember { mutableStateOf("all") }
         var expandedPkg by remember { mutableStateOf<String?>(selectedPkg) }
@@ -1076,14 +1069,39 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
 
                 Spacer(Modifier.height(10.dp))
 
-                LazyColumn(
+                Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .weight(1f),
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 4.dp, bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                        .weight(1f)
+                        .layout { measurable, constraints ->
+                            val offsetPx = runCatching { sheetState.requireOffset() }
+                                .getOrNull()
+                                ?.takeIf { !it.isNaN() }
+                                ?.roundToInt()
+                                ?.coerceAtLeast(0)
+                                ?: 0
+                            val visibleHeight = (constraints.maxHeight - offsetPx)
+                                .coerceIn(0, constraints.maxHeight)
+                            val placeable = measurable.measure(
+                                constraints.copy(minHeight = 0, maxHeight = visibleHeight)
+                            )
+                            layout(constraints.maxWidth, constraints.maxHeight) {
+                                placeable.place(0, 0)
+                            }
+                        }
                 ) {
-                    items(filtered, key = { it.packageName }) { app ->
+                    LazyColumn(
+                        state = pickerListState,
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(
+                            start = 20.dp,
+                            end = 20.dp,
+                            top = 4.dp,
+                            bottom = 24.dp + navBottomPadding
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(filtered, key = { it.packageName }) { app ->
                         val isExpanded = expandedPkg == app.packageName
                         val isCustom = overrideMap[app.packageName] == true
                         val appState = appStatesMap.getOrPut(app.packageName) {
@@ -1291,28 +1309,14 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                             }
                                         )
 
-                                        Row(
-                                            modifier = Modifier.fillMaxWidth(),
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        OutlinedButton(
+                                            onClick = { morpheOptionsTarget = app.label to appState },
+                                            shape = RoundedCornerShape(14.dp),
+                                            modifier = Modifier.fillMaxWidth()
                                         ) {
-                                            OutlinedButton(
-                                                onClick = { copyMorpheCliOptions(app.label, appState) },
-                                                shape = RoundedCornerShape(14.dp),
-                                                modifier = Modifier.weight(1f)
-                                            ) {
-                                                Icon(Icons.Rounded.ContentCopy, null, modifier = Modifier.size(16.dp))
-                                                Spacer(Modifier.size(6.dp))
-                                                Text("Copy Morphe CLI", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            }
-                                            OutlinedButton(
-                                                onClick = { morpheOptionsTarget = app.label to appState },
-                                                shape = RoundedCornerShape(14.dp),
-                                                modifier = Modifier.weight(1f)
-                                            ) {
-                                                Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
-                                                Spacer(Modifier.size(6.dp))
-                                                Text("Checklist", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                            }
+                                            Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
+                                            Spacer(Modifier.size(8.dp))
+                                            Text("Morphe Patching Options")
                                         }
 
                                         FilledTonalButton(
@@ -1336,6 +1340,7 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             }
                         }
                     }
+                    }
                 }
             }
         }
@@ -1344,6 +1349,8 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     // Live Hook Event Log Drawer (opened by tapping any StatTile)
     if (showEventLogSheet) {
         val logSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false)
+        val logListState = rememberLazyListState()
+        val navBottomPadding = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
         val filterChips = listOf(
             "all" to "All",
             "pin" to "Pinning",
@@ -1358,103 +1365,129 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         }
         val timeFmt = remember { DateFormat.getTimeInstance(DateFormat.MEDIUM) }
 
+        LaunchedEffect(eventLogFilter) {
+            logListState.scrollToItem(0)
+        }
+
         ModalBottomSheet(
             onDismissRequest = { showEventLogSheet = false },
             sheetState = logSheetState
         ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
+            Column(modifier = Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Live Hook Event Log",
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Text(
-                            text = selectedPkg ?: "All scoped apps",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    IconButton(
-                        onClick = {
-                            prefsManager.resetStats(selectedPkg)
-                            stats = HookStats()
-                            eventLog = prefsManager.loadEventLog(selectedPkg)
-                        }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = "Reset event log"
-                        )
-                    }
-                }
-
-                FlowRow(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    filterChips.forEach { (id, label) ->
-                        FilterChip(
-                            selected = eventLogFilter == id,
-                            onClick = { eventLogFilter = id },
-                            label = { Text(label) }
-                        )
-                    }
-                }
-
-                FilledTonalButton(
-                    onClick = {
-                        if (eventLog.isEmpty()) {
-                            scope.launch {
-                                snackbarHostState.showSnackbar("No recorded hits yet — launch the target app first")
-                            }
-                            return@FilledTonalButton
-                        }
-                        val (prunedState, disabledCount) = hookState.pruneUnusedHooks(eventLog)
-                        updateState { prunedState }
-                        scope.launch {
-                            snackbarHostState.showSnackbar(
-                                if (disabledCount > 0) {
-                                    "Kept active hooks for $selectedLabel · disabled $disabledCount unused"
-                                } else {
-                                    "All enabled hooks already have active hits"
-                                }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Live Hook Event Log",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = selectedPkg ?: "All scoped apps",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                    },
-                    enabled = eventLog.isNotEmpty(),
-                    shape = RoundedCornerShape(14.dp),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.AutoFixHigh,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(Modifier.size(8.dp))
-                    Text("Keep Active Only (Prune 0-Hit Hooks)")
+                        IconButton(
+                            onClick = {
+                                prefsManager.resetStats(selectedPkg)
+                                stats = HookStats()
+                                eventLog = prefsManager.loadEventLog(selectedPkg)
+                            }
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Refresh,
+                                contentDescription = "Reset event log"
+                            )
+                        }
+                    }
+
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        filterChips.forEach { (id, label) ->
+                            FilterChip(
+                                selected = eventLogFilter == id,
+                                onClick = { eventLogFilter = id },
+                                label = { Text(label) }
+                            )
+                        }
+                    }
+
+                    FilledTonalButton(
+                        onClick = {
+                            if (eventLog.isEmpty()) {
+                                scope.launch {
+                                    snackbarHostState.showSnackbar("No recorded hits yet — launch the target app first")
+                                }
+                                return@FilledTonalButton
+                            }
+                            val (prunedState, disabledCount) = hookState.pruneUnusedHooks(eventLog)
+                            updateState { prunedState }
+                            scope.launch {
+                                snackbarHostState.showSnackbar(
+                                    if (disabledCount > 0) {
+                                        "Kept active hooks for $selectedLabel · disabled $disabledCount unused"
+                                    } else {
+                                        "All enabled hooks already have active hits"
+                                    }
+                                )
+                            }
+                        },
+                        enabled = eventLog.isNotEmpty(),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.AutoFixHigh,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.size(8.dp))
+                        Text("Keep Active Only (Prune 0-Hit Hooks)")
+                    }
                 }
+
+                Spacer(Modifier.height(10.dp))
 
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
+                        .layout { measurable, constraints ->
+                            val offsetPx = runCatching { logSheetState.requireOffset() }
+                                .getOrNull()
+                                ?.takeIf { !it.isNaN() }
+                                ?.roundToInt()
+                                ?.coerceAtLeast(0)
+                                ?: 0
+                            val visibleHeight = (constraints.maxHeight - offsetPx)
+                                .coerceIn(0, constraints.maxHeight)
+                            val placeable = measurable.measure(
+                                constraints.copy(minHeight = 0, maxHeight = visibleHeight)
+                            )
+                            layout(constraints.maxWidth, constraints.maxHeight) {
+                                placeable.place(0, 0)
+                            }
+                        }
                 ) {
                     if (filteredEntries.isEmpty()) {
                         Surface(
                             shape = RoundedCornerShape(18.dp),
                             color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                            modifier = Modifier.fillMaxWidth()
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp)
                         ) {
                             Text(
                                 text = "No hook events recorded for this filter yet. Launch a scoped target app and trigger pinning or focus transitions.",
@@ -1465,11 +1498,20 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         }
                     } else {
                         LazyColumn(
+                            state = logListState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(bottom = 24.dp),
+                            contentPadding = PaddingValues(
+                                start = 20.dp,
+                                end = 20.dp,
+                                top = 4.dp,
+                                bottom = 24.dp + navBottomPadding
+                            ),
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            items(filteredEntries) { entry ->
+                            items(
+                                items = filteredEntries,
+                                key = { "${it.pkg}|${it.category}|${it.method}" }
+                            ) { entry ->
                                 EventLogRow(entry = entry, formattedTime = timeFmt.format(Date(entry.timestampMs)))
                             }
                         }
@@ -1479,16 +1521,15 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         }
     }
 
-    // Morphe CLI & Manager Checklist Dialog
+    // Morphe Patching Options Checklist Dialog
     morpheOptionsTarget?.let { (targetTitle, targetState) ->
-        val cliFlags = remember(targetState) { targetState.toMorpheCliFlags() }
         val checklist = remember(targetState) { targetState.toMorpheChecklist() }
 
         AlertDialog(
             onDismissRequest = { morpheOptionsTarget = null },
             title = {
                 Column {
-                    Text("Morphe Patch Options", fontWeight = FontWeight.SemiBold)
+                    Text("Morphe Patching Options", fontWeight = FontWeight.SemiBold)
                     Text(
                         text = targetTitle,
                         style = MaterialTheme.typography.bodySmall,
@@ -1502,84 +1543,58 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                         .fillMaxWidth()
                         .heightIn(max = 420.dp)
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "Morphe Desktop CLI (-O Flags)",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
+                        text = if (targetState.masterEnabled) {
+                            "Enable these toggles in Morphe Manager under PinSpoof Patching Options:"
+                        } else {
+                            "Master switch is OFF for this config — all hooks are shown OFF:"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            text = cliFlags,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace,
-                            modifier = Modifier.padding(12.dp)
-                        )
-                    }
-
-                    Text(
-                        text = "Morphe Manager Checklist",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        checklist.forEach { (optName, optValue) ->
-                            val isActiveVal = optValue == "ON" || optValue.startsWith("Always")
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
+                    checklist.forEach { (optName, optValue) ->
+                        val isActiveVal = optValue == "ON" || optValue.startsWith("Always")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = optName,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 8.dp)
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = if (isActiveVal) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceContainerHighest
+                                }
                             ) {
                                 Text(
-                                    text = optName,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .padding(end = 8.dp)
-                                )
-                                Surface(
-                                    shape = RoundedCornerShape(8.dp),
+                                    text = optValue,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontFamily = FontFamily.Monospace,
                                     color = if (isActiveVal) {
-                                        MaterialTheme.colorScheme.primaryContainer
+                                        MaterialTheme.colorScheme.onPrimaryContainer
                                     } else {
-                                        MaterialTheme.colorScheme.surfaceContainerHighest
-                                    }
-                                ) {
-                                    Text(
-                                        text = optValue,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = if (isActiveVal) {
-                                            MaterialTheme.colorScheme.onPrimaryContainer
-                                        } else {
-                                            MaterialTheme.colorScheme.onSurfaceVariant
-                                        },
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
-                                    )
-                                }
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                                )
                             }
                         }
                     }
                 }
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        copyMorpheCliOptions(targetTitle, targetState)
-                        morpheOptionsTarget = null
-                    }
-                ) {
-                    Text("Copy -O Flags")
-                }
-            },
-            dismissButton = {
                 TextButton(onClick = { morpheOptionsTarget = null }) {
                     Text("Close")
                 }

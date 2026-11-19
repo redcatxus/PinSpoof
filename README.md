@@ -34,17 +34,17 @@ PinSpoof lets you stay in control of multitasking, screenshots, and system navig
 
 > **Note:** Morphe re-signs the patched APK. For apps that check signing certificates or client integrity APIs, enable the optional signing certificate DER hex and integrity compatibility toggles in Patching Options, or use **Option 2 (LSPosed)**.
 
-1. Download `PinSpoof-v1.3.2.mpp` from [Releases](https://github.com/redcatxus/PinSpoof/releases) (or build locally in `morphe-patches/` via `gradle :patches:buildAndroid :patches:generatePatchesList`).
-2. Import `PinSpoof-v1.3.1.mpp` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI**.
+1. Download `PinSpoof-v1.4.0.mpp` from [Releases](https://github.com/redcatxus/PinSpoof/releases) (or build locally in `morphe-patches/` via `gradle :patches:buildAndroid :patches:generatePatchesList`).
+2. Import `PinSpoof-v1.4.0.mpp` into **Morphe Manager** (Expert Mode) or **Morphe Desktop CLI**.
 3. Pick any target APK and open **Patching Options** on the **PinSpoof** patch to customize your preset or individual toggles (pinning, Recents broadcasts, window focus, WebView JS/visibility, lifecycle preservation, multi-window/PiP, display/screenshot/audio/clipboard controls, sensor stabilization, and environment/signature compatibility).
 4. Patch and install the modified APK.
 
 ## Option 2: LSPosed Setup
 
-1. Install **`PinSpoof-v1.3.2.apk`** (`versionCode: 6`) from [Releases](https://github.com/redcatxus/PinSpoof/releases).
+1. Install **`PinSpoof-v1.4.0.apk`** (`versionCode: 7`) from [Releases](https://github.com/redcatxus/PinSpoof/releases).
 2. Open **LSPosed Manager** -> **Modules** -> **PinSpoof**.
 3. Enable the module and select **only the target apps** you want to affect (keep **System Framework (`android`) UNCHECKED**).
-4. Open the **PinSpoof** companion app to select a preset (**Light**, **Balanced**, **Aggressive**) or customize granular toggles globally or per app, then force-stop and relaunch your target app.
+4. Open the **PinSpoof** companion app to select a preset (**Light**, **Balanced**, **Aggressive**) or customize granular toggles globally or per app, open the **Morphe Patch Options** checklist to mirror toggles into Morphe Manager, then force-stop and relaunch your target app.
 
 - **Package ID**: `us.redcatx.pinspoof`
 - **Entry Class**: `us.redcatx.pinspoof.PinSpoofModule`

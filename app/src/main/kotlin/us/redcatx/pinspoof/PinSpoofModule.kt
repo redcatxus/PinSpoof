@@ -54,7 +54,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * PinSpoof v1.3.2 — App-Scoped LockTask, Anti-Detection & UI Stealth Module (Android 7 – 16 / API 24 – 36)
+ * PinSpoof v1.4.0 — App-Scoped LockTask, Anti-Detection & UI Stealth Module (Android 7 – 16 / API 24 – 36)
  *
  * 1. Reactive mode + Window Focus, WebView visibility/JS stealth, and Activity/Fragment lifecycle
  *    stealth are ON by default; Binder Stub$Proxy hooks, anti-detection cloaking, virtual display
