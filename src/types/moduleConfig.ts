@@ -47,8 +47,8 @@ export interface GeneratedFile {
 export const DEFAULT_MODULE_CONFIG: ModuleConfig = {
   packageName: 'us.redcatx.pinspoof',
   moduleName: 'PinSpoof',
-  versionName: '1.4.0',
-  versionCode: 7,
+  versionName: '1.5.0',
+  versionCode: 8,
   minSdk: 24,
   targetSdk: 36,
   spoofTiming: 'reactive',

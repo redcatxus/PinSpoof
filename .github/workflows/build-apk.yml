@@ -25,13 +25,13 @@ jobs:
             echo "dir=$(dirname "$SETTINGS_PATH")" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
-      - name: Install Android SDK Platform 36 & Build Tools
+      - name: Install Android SDK Platform 37.1 & Build Tools
         run: |
           SDKMANAGER=$(command -v sdkmanager || find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
           if [ -z "$SDKMANAGER" ]; then
@@ -39,25 +39,25 @@ jobs:
             exit 1
           fi
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          "$SDKMANAGER" "platforms;android-36" "build-tools;36.0.0"
+          "$SDKMANAGER" "platforms;android-37.1" "build-tools;37.0.0"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.11.1
+          gradle-version: 9.9.1
 
-      - name: Build Debug & Release APKs (API 36)
+      - name: Build Debug & Release APKs (API 37.1)
         working-directory: ${{ steps.gradle_root.outputs.dir }}
         run: gradle assembleDebug assembleRelease
 
-      - name: Stage PinSpoof-v1.4.0.apk Release & Debug Outputs
+      - name: Stage PinSpoof-v1.5.0.apk Release & Debug Outputs
         working-directory: ${{ steps.gradle_root.outputs.dir }}
         run: |
           mkdir -p dist-apks
           RELEASE_APK=$(find app/build/outputs/apk/release -name "*.apk" | head -n 1)
           DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
-          cp "$RELEASE_APK" "dist-apks/PinSpoof-v1.4.0.apk"
-          cp "$DEBUG_APK" "dist-apks/PinSpoof-v1.4.0-debug.apk"
+          cp "$RELEASE_APK" "dist-apks/PinSpoof-v1.5.0.apk"
+          cp "$DEBUG_APK" "dist-apks/PinSpoof-v1.5.0-debug.apk"
 
       - name: Upload APK Artifacts
         uses: actions/upload-artifact@v4
@@ -115,12 +115,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gradle :patches:buildAndroid :patches:generatePatchesList --no-daemon
 
-      - name: Stage PinSpoof-v1.4.0.mpp Bundle & Patches List
+      - name: Stage PinSpoof-v1.5.0.mpp Bundle & Patches List
         working-directory: ${{ steps.morphe_root.outputs.dir }}
         run: |
           mkdir -p dist-patches
           MPP_FILE=$(find patches/build/libs -maxdepth 1 -name "*.mpp" | head -n 1)
-          cp "$MPP_FILE" "dist-patches/PinSpoof-v1.4.0.mpp"
+          cp "$MPP_FILE" "dist-patches/PinSpoof-v1.5.0.mpp"
           cp "patches-list.json" "dist-patches/patches-list.json"
 
       - name: Upload Morphe Patch Artifacts

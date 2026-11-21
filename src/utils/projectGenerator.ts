@@ -2083,7 +2083,6 @@ function generatePinSpoofThemeKt(pkg: string): string {
 
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialExpressiveTheme
 import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.darkColorScheme
@@ -2119,7 +2118,6 @@ private val FallbackLightScheme = lightColorScheme(
     onSecondaryContainer = Color(0xFF0B1F14),
 )
 
-@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun PinSpoofTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
@@ -2815,24 +2813,24 @@ import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ButtonGroupDefaults
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularWavyProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilledTonalToggleButton
+import androidx.compose.material3.FilledTonalToggleButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.LargeTopAppBar
+import androidx.compose.material3.LargeFlexibleTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -2855,16 +2853,23 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import kotlin.math.roundToInt
 import androidx.lifecycle.Lifecycle
@@ -2959,9 +2964,40 @@ private fun AppIconView(
     }
 }
 
+private fun loadInstalledApps(
+    pm: PackageManager,
+    prefsManager: PrefsManager
+): List<InstalledAppItem> {
+    val launchablePkgs = runCatching {
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        pm.queryIntentActivities(intent, 0).mapNotNullTo(HashSet()) { it.activityInfo?.packageName }
+    }.getOrDefault(emptySet())
+
+    return pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        .asSequence()
+        .mapNotNull { info ->
+            val pName = info.packageName
+            if (pName == HookConfig.MODULE_PKG || pName == "android") return@mapNotNull null
+            val hasCustom = prefsManager.hasPerAppOverride(pName)
+            val hitTotal = prefsManager.getPackageHitTotal(pName)
+            val isUserOrLaunchable = (info.flags and ApplicationInfo.FLAG_SYSTEM) == 0 ||
+                pName in launchablePkgs ||
+                hasCustom ||
+                hitTotal > 0L
+            if (!isUserOrLaunchable) return@mapNotNull null
+            InstalledAppItem(
+                label = pm.getApplicationLabel(info).toString(),
+                packageName = pName,
+                hasOverride = hasCustom,
+                hitTotal = hitTotal
+            )
+        }
+        .sortedWith(compareBy<InstalledAppItem> { it.label.lowercase() }.thenBy { it.packageName })
+        .toList()
+}
+
 @OptIn(
     ExperimentalMaterial3Api::class,
-    ExperimentalMaterial3ExpressiveApi::class,
     ExperimentalLayoutApi::class
 )
 @Composable
@@ -2980,6 +3016,8 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
     }
     var stats by remember(selectedPkg) { mutableStateOf(prefsManager.loadStats(selectedPkg)) }
     var eventLog by remember(selectedPkg) { mutableStateOf(prefsManager.loadEventLog(selectedPkg)) }
+    var isLoadingAppPicker by remember { mutableStateOf(false) }
+    var loadedInstalledApps by remember { mutableStateOf<List<InstalledAppItem>?>(null) }
     var showAppPicker by remember { mutableStateOf(false) }
     var showEventLogSheet by remember { mutableStateOf(false) }
     var eventLogFilter by remember { mutableStateOf("all") }
@@ -3050,25 +3088,29 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
             .nestedScroll(scrollBehavior.nestedScrollConnection),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            LargeTopAppBar(
+            LargeFlexibleTopAppBar(
                 title = {
-                    Column {
-                        Text(
-                            text = HookConfig.MODULE_TAG,
-                            style = MaterialTheme.typography.headlineMediumEmphasized,
-                            fontWeight = FontWeight.Bold
-                        )
-                        Text(
-                            text = if (prefsManager.isWorldReadableActive) {
-                                "LSPosed xposedsharedprefs active · App-scoped"
-                            } else {
-                                "Enable module in LSPosed to sync preferences"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text(
+                        text = HookConfig.MODULE_TAG,
+                        fontWeight = FontWeight.Bold
+                    )
                 },
+                subtitle = {
+                    Text(
+                        text = if (prefsManager.isWorldReadableActive) {
+                            "LSPosed xposedsharedprefs active · App-scoped"
+                        } else {
+                            "Enable module in LSPosed to sync preferences"
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainerLow
+                ),
                 scrollBehavior = scrollBehavior
             )
         }
@@ -3145,12 +3187,27 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
 
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             FilledTonalButton(
-                                onClick = { showAppPicker = true },
-                                shape = RoundedCornerShape(16.dp),
+                                onClick = {
+                                    if (!isLoadingAppPicker) {
+                                        isLoadingAppPicker = true
+                                        scope.launch {
+                                            val apps = withContext(Dispatchers.IO) {
+                                                loadInstalledApps(context.packageManager, prefsManager)
+                                            }
+                                            loadedInstalledApps = apps
+                                            isLoadingAppPicker = false
+                                            showAppPicker = true
+                                        }
+                                    }
+                                },
+                                shapes = ButtonDefaults.shapes(
+                                    shape = RoundedCornerShape(16.dp),
+                                    pressedShape = RoundedCornerShape(10.dp)
+                                ),
                                 colors = ButtonDefaults.filledTonalButtonColors(
                                     containerColor = MaterialTheme.colorScheme.secondaryContainer,
                                     contentColor = MaterialTheme.colorScheme.onSecondaryContainer
@@ -3163,6 +3220,18 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 )
                                 Spacer(Modifier.size(8.dp))
                                 Text("Select App Override")
+                            }
+
+                            AnimatedVisibility(visible = isLoadingAppPicker) {
+                                val strokePx = with(LocalDensity.current) { 3.dp.toPx() }
+                                CircularWavyProgressIndicator(
+                                    modifier = Modifier.size(28.dp),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    trackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                    stroke = Stroke(width = strokePx, cap = StrokeCap.Round),
+                                    trackStroke = Stroke(width = strokePx, cap = StrokeCap.Round),
+                                    wavelength = 10.dp
+                                )
                             }
 
                             if (selectedPkg != null) {
@@ -3186,7 +3255,10 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                     val base = selectedPkg ?: "global"
                                     exportLauncher.launch("pinspoof-\$base.json")
                                 },
-                                shape = RoundedCornerShape(16.dp),
+                                shapes = ButtonDefaults.shapes(
+                                    shape = RoundedCornerShape(16.dp),
+                                    pressedShape = RoundedCornerShape(10.dp)
+                                ),
                                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurface
@@ -3204,7 +3276,10 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             }
                             OutlinedButton(
                                 onClick = { importLauncher.launch(arrayOf("application/json", "text/plain")) },
-                                shape = RoundedCornerShape(16.dp),
+                                shapes = ButtonDefaults.shapes(
+                                    shape = RoundedCornerShape(16.dp),
+                                    pressedShape = RoundedCornerShape(10.dp)
+                                ),
                                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurface
@@ -3222,7 +3297,10 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             }
                             OutlinedButton(
                                 onClick = { morpheOptionsTarget = selectedLabel to hookState },
-                                shape = RoundedCornerShape(16.dp),
+                                shapes = ButtonDefaults.shapes(
+                                    shape = RoundedCornerShape(16.dp),
+                                    pressedShape = RoundedCornerShape(10.dp)
+                                ),
                                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                                 colors = ButtonDefaults.outlinedButtonColors(
                                     contentColor = MaterialTheme.colorScheme.onSurface
@@ -3384,23 +3462,41 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                 style = MaterialTheme.typography.labelLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
-                            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                                HookPreset.entries.forEachIndexed { index, preset ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)
+                            ) {
+                                val presets = HookPreset.entries
+                                val toggleColors = FilledTonalToggleButtonDefaults.colors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    checkedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                    checkedContentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                                presets.forEachIndexed { index, preset ->
                                     val isSelected = hookState == hookState.withPreset(preset)
-                                    SegmentedButton(
-                                        selected = isSelected,
-                                        onClick = {
+                                    FilledTonalToggleButton(
+                                        checked = isSelected,
+                                        onCheckedChange = {
                                             updateState { it.withPreset(preset) }
                                             scope.launch {
                                                 snackbarHostState.showSnackbar("Applied \${preset.label} preset")
                                             }
                                         },
-                                        shape = SegmentedButtonDefaults.itemShape(
-                                            index = index,
-                                            count = HookPreset.entries.size
-                                        )
+                                        shapes = when (index) {
+                                            0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
+                                            presets.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
+                                            else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
+                                        },
+                                        colors = toggleColors,
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                                        modifier = Modifier.weight(1f)
                                     ) {
-                                        Text(preset.label)
+                                        Text(
+                                            text = preset.label,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                     }
                                 }
                             }
@@ -3423,20 +3519,35 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                     style = MaterialTheme.typography.labelLarge,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
-                                SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                                    SegmentedButton(
-                                        selected = !hookState.alwaysSpoofPinned,
-                                        onClick = { updateState { it.copy(alwaysSpoofPinned = false) } },
-                                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)
+                                ) {
+                                    val timingColors = FilledTonalToggleButtonDefaults.colors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        checkedContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                        checkedContentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    FilledTonalToggleButton(
+                                        checked = !hookState.alwaysSpoofPinned,
+                                        onCheckedChange = { updateState { it.copy(alwaysSpoofPinned = false) } },
+                                        shapes = ButtonGroupDefaults.connectedLeadingButtonShapes(),
+                                        colors = timingColors,
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                                        modifier = Modifier.weight(1f)
                                     ) {
-                                        Text("Reactive")
+                                        Text("Reactive", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
-                                    SegmentedButton(
-                                        selected = hookState.alwaysSpoofPinned,
-                                        onClick = { updateState { it.copy(alwaysSpoofPinned = true) } },
-                                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2)
+                                    FilledTonalToggleButton(
+                                        checked = hookState.alwaysSpoofPinned,
+                                        onCheckedChange = { updateState { it.copy(alwaysSpoofPinned = true) } },
+                                        shapes = ButtonGroupDefaults.connectedTrailingButtonShapes(),
+                                        colors = timingColors,
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 10.dp),
+                                        modifier = Modifier.weight(1f)
                                     ) {
-                                        Text("Always Pinned")
+                                        Text("Always Pinned", maxLines = 1, overflow = TextOverflow.Ellipsis)
                                     }
                                 }
                             }
@@ -3697,37 +3808,25 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
         var appFilter by remember { mutableStateOf("all") }
         var expandedPkg by remember { mutableStateOf<String?>(selectedPkg) }
         val appStatesMap = remember { mutableStateMapOf<String, GranularHookState>() }
-        val overrideMap = remember { mutableStateMapOf<String, Boolean>() }
+        val installedApps = loadedInstalledApps ?: emptyList()
+        val overrideMap = remember(installedApps) {
+            mutableStateMapOf<String, Boolean>().apply {
+                installedApps.forEach { put(it.packageName, it.hasOverride) }
+            }
+        }
+        val sheetListNestedScroll = remember {
+            object : NestedScrollConnection {
+                override fun onPostScroll(
+                    consumed: Offset,
+                    available: Offset,
+                    source: NestedScrollSource
+                ): Offset = Offset(0f, available.y)
 
-        val installedApps = remember {
-            val pm = context.packageManager
-            val launchablePkgs = runCatching {
-                val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-                pm.queryIntentActivities(intent, 0).mapNotNullTo(HashSet()) { it.activityInfo?.packageName }
-            }.getOrDefault(emptySet())
-
-            pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .asSequence()
-                .mapNotNull { info ->
-                    val pName = info.packageName
-                    if (pName == HookConfig.MODULE_PKG || pName == "android") return@mapNotNull null
-                    val hasCustom = prefsManager.hasPerAppOverride(pName)
-                    val hitTotal = prefsManager.getPackageHitTotal(pName)
-                    val isUserOrLaunchable = (info.flags and ApplicationInfo.FLAG_SYSTEM) == 0 ||
-                        pName in launchablePkgs ||
-                        hasCustom ||
-                        hitTotal > 0L
-                    if (!isUserOrLaunchable) return@mapNotNull null
-                    overrideMap[pName] = hasCustom
-                    InstalledAppItem(
-                        label = pm.getApplicationLabel(info).toString(),
-                        packageName = pName,
-                        hasOverride = hasCustom,
-                        hitTotal = hitTotal
-                    )
-                }
-                .sortedWith(compareBy<InstalledAppItem> { it.label.lowercase() }.thenBy { it.packageName })
-                .toList()
+                override suspend fun onPostFling(
+                    consumed: Velocity,
+                    available: Velocity
+                ): Velocity = Velocity(0f, available.y)
+            }
         }
 
         val modifiedCount = remember(overrideMap.toMap()) {
@@ -3833,7 +3932,10 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                 ) {
                     LazyColumn(
                         state = pickerListState,
-                        modifier = Modifier.fillMaxSize(),
+                        overscrollEffect = null,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .nestedScroll(sheetListNestedScroll),
                         contentPadding = PaddingValues(
                             start = 20.dp,
                             end = 20.dp,
@@ -3996,18 +4098,32 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                             style = MaterialTheme.typography.labelMedium,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
-                                        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                                            HookPreset.entries.forEachIndexed { idx, preset ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(ButtonGroupDefaults.ConnectedSpaceBetween)
+                                        ) {
+                                            val presets = HookPreset.entries
+                                            val perAppToggleColors = FilledTonalToggleButtonDefaults.colors(
+                                                containerColor = MaterialTheme.colorScheme.surfaceContainerLowest,
+                                                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                checkedContainerColor = MaterialTheme.colorScheme.primary,
+                                                checkedContentColor = MaterialTheme.colorScheme.onPrimary
+                                            )
+                                            presets.forEachIndexed { idx, preset ->
                                                 val presetSelected = isCustom && appState == appState.withPreset(preset)
-                                                SegmentedButton(
-                                                    selected = presetSelected,
-                                                    onClick = { saveAppRule(appState.withPreset(preset)) },
-                                                    shape = SegmentedButtonDefaults.itemShape(
-                                                        index = idx,
-                                                        count = HookPreset.entries.size
-                                                    )
+                                                FilledTonalToggleButton(
+                                                    checked = presetSelected,
+                                                    onCheckedChange = { saveAppRule(appState.withPreset(preset)) },
+                                                    shapes = when (idx) {
+                                                        0 -> ButtonGroupDefaults.connectedLeadingButtonShapes()
+                                                        presets.lastIndex -> ButtonGroupDefaults.connectedTrailingButtonShapes()
+                                                        else -> ButtonGroupDefaults.connectedMiddleButtonShapes()
+                                                    },
+                                                    colors = perAppToggleColors,
+                                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                                                    modifier = Modifier.weight(1f)
                                                 ) {
-                                                    Text(preset.label, maxLines = 1)
+                                                    Text(preset.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                                 }
                                             }
                                         }
@@ -4052,7 +4168,10 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
 
                                         OutlinedButton(
                                             onClick = { morpheOptionsTarget = app.label to appState },
-                                            shape = RoundedCornerShape(14.dp),
+                                            shapes = ButtonDefaults.shapes(
+                                                shape = RoundedCornerShape(14.dp),
+                                                pressedShape = RoundedCornerShape(9.dp)
+                                            ),
                                             modifier = Modifier.fillMaxWidth()
                                         ) {
                                             Icon(Icons.Rounded.Checklist, null, modifier = Modifier.size(16.dp))
@@ -4071,7 +4190,10 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                                                 hasOverride = true
                                                 showAppPicker = false
                                             },
-                                            shape = RoundedCornerShape(14.dp),
+                                            shapes = ButtonDefaults.shapes(
+                                                shape = RoundedCornerShape(14.dp),
+                                                pressedShape = RoundedCornerShape(9.dp)
+                                            ),
                                             modifier = Modifier.fillMaxWidth()
                                         ) {
                                             Text("Open All Controls & JSON")
@@ -4105,6 +4227,23 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
             else eventLog.filter { it.category == eventLogFilter }
         }
         val timeFmt = remember { DateFormat.getTimeInstance(DateFormat.MEDIUM) }
+        val formattedRows = remember(filteredEntries, timeFmt) {
+            filteredEntries.map { entry -> entry to timeFmt.format(Date(entry.timestampMs)) }
+        }
+        val logListNestedScroll = remember {
+            object : NestedScrollConnection {
+                override fun onPostScroll(
+                    consumed: Offset,
+                    available: Offset,
+                    source: NestedScrollSource
+                ): Offset = Offset(0f, available.y)
+
+                override suspend fun onPostFling(
+                    consumed: Velocity,
+                    available: Velocity
+                ): Velocity = Velocity(0f, available.y)
+            }
+        }
 
         LaunchedEffect(eventLogFilter) {
             logListState.scrollToItem(0)
@@ -4186,7 +4325,10 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             }
                         },
                         enabled = eventLog.isNotEmpty(),
-                        shape = RoundedCornerShape(14.dp),
+                        shapes = ButtonDefaults.shapes(
+                            shape = RoundedCornerShape(14.dp),
+                            pressedShape = RoundedCornerShape(9.dp)
+                        ),
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Icon(
@@ -4240,7 +4382,10 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                     } else {
                         LazyColumn(
                             state = logListState,
-                            modifier = Modifier.fillMaxSize(),
+                            overscrollEffect = null,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .nestedScroll(logListNestedScroll),
                             contentPadding = PaddingValues(
                                 start = 20.dp,
                                 end = 20.dp,
@@ -4250,10 +4395,10 @@ private fun PinSpoofControlScreen(prefsManager: PrefsManager) {
                             verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             items(
-                                items = filteredEntries,
-                                key = { "\${it.pkg}|\${it.category}|\${it.method}" }
-                            ) { entry ->
-                                EventLogRow(entry = entry, formattedTime = timeFmt.format(Date(entry.timestampMs)))
+                                items = formattedRows,
+                                key = { (entry, _) -> "\${entry.pkg}|\${entry.category}|\${entry.method}" }
+                            ) { (entry, formattedTime) ->
+                                EventLogRow(entry = entry, formattedTime = formattedTime)
                             }
                         }
                     }
@@ -4663,18 +4808,17 @@ function generateAppBuildGradle(config: ModuleConfig, pkg: string): string {
 
   const composeDeps = config.includeMaterialYouUi
     ? `
-    implementation(platform("androidx.compose:compose-bom:2026.03.01"))
-    implementation("androidx.activity:activity-compose:1.10.1")
+    implementation(platform("androidx.compose:compose-bom:2026.11.01"))
+    implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material:material-icons-extended")
-    // Material 3 1.5.0-alpha15 provides MaterialExpressiveTheme while targeting minCompileSdk 35 (compatible with Android 16 / compileSdk 36)
-    implementation("androidx.compose.material3:material3:1.5.0-alpha15")`
+    // Stable Material 3 Expressive 1.5.0 resolved via Compose BOM 2026.11.01
+    implementation("androidx.compose.material3:material3")`
     : '';
 
   return `plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")${composePlugins}
+    id("com.android.application")${composePlugins}
 }
 
 base {
@@ -4683,7 +4827,11 @@ base {
 
 android {
     namespace = "${pkg}"
-    compileSdk = ${config.targetSdk}
+    compileSdk {
+        version = release(37) {
+            minorApiLevel = 1
+        }
+    }
 
     defaultConfig {
         applicationId = "${pkg}"
@@ -4712,9 +4860,11 @@ ${composeBlock}
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+}
 
-    kotlinOptions {
-        jvmTarget = "17"
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
@@ -4727,12 +4877,11 @@ dependencies {
 
 function generateRootBuildGradle(config: ModuleConfig): string {
   const composePlugin = config.includeMaterialYouUi
-    ? `\n    id("org.jetbrains.kotlin.plugin.compose") version "2.1.20" apply false`
+    ? `\n    id("org.jetbrains.kotlin.plugin.compose") version "2.2.10" apply false`
     : '';
   return `plugins {
-    // AGP 8.9.1+ required for Android 16 (compileSdk = 36)
-    id("com.android.application") version "8.9.1" apply false
-    id("org.jetbrains.kotlin.android") version "2.1.20" apply false${composePlugin}
+    // AGP 9.5.2+ & built-in Kotlin required for Android API 37.1 / Material 3 1.5.0
+    id("com.android.application") version "9.5.2" apply false${composePlugin}
 }
 `;
 }
@@ -4763,7 +4912,7 @@ include(":app")
 function generateGradleWrapperProperties(): string {
   return `distributionBase=GRADLE_USER_HOME
 distributionPath=wrapper/dists
-distributionUrl=https\\://services.gradle.org/distributions/gradle-8.11.1-bin.zip
+distributionUrl=https\\://services.gradle.org/distributions/gradle-9.9.1-bin.zip
 networkTimeout=10000
 validateDistributionUrl=true
 zipStoreBase=GRADLE_USER_HOME
@@ -4790,7 +4939,7 @@ function generateProguardRules(pkg: string): string {
 
 function generateGithubWorkflow(config: ModuleConfig): string {
   const folderName = config.moduleName.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'PinSpoof';
-  const ver = config.versionName.trim() || '1.4.0';
+  const ver = config.versionName.trim() || '1.5.0';
   return `name: Build ${config.moduleName} APK & Morphe Patches
 
 on:
@@ -4818,13 +4967,13 @@ jobs:
             echo "dir=$(dirname "$SETTINGS_PATH")" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Set up JDK 17
+      - name: Set up JDK 21
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: 17
+          java-version: 21
 
-      - name: Install Android SDK Platform ${config.targetSdk} & Build Tools
+      - name: Install Android SDK Platform 37.1 & Build Tools
         run: |
           SDKMANAGER=$(command -v sdkmanager || find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
           if [ -z "$SDKMANAGER" ]; then
@@ -4832,14 +4981,14 @@ jobs:
             exit 1
           fi
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
-          "$SDKMANAGER" "platforms;android-${config.targetSdk}" "build-tools;${config.targetSdk}.0.0"
+          "$SDKMANAGER" "platforms;android-37.1" "build-tools;37.0.0"
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: 8.11.1
+          gradle-version: 9.9.1
 
-      - name: Build Debug & Release APKs (API ${config.targetSdk})
+      - name: Build Debug & Release APKs (API 37.1)
         working-directory: \${{ steps.gradle_root.outputs.dir }}
         run: gradle assembleDebug assembleRelease
 
@@ -7112,7 +7261,7 @@ private class JsonCompatibility(
 
 function generateReadme(config: ModuleConfig, pkg: string): string {
   const folderName = config.moduleName.trim().replace(/[^a-zA-Z0-9_-]/g, '') || 'PinSpoof';
-  const ver = config.versionName.trim() || '1.4.0';
+  const ver = config.versionName.trim() || '1.5.0';
   return `# ${config.moduleName}
 
 App-scoped Xposed (LSPosed / LSPatch) module **and** rootless Morphe Patch Bundle targeting **Android 7.0 – Android 16 (API ${config.minSdk}–${config.targetSdk})**:
